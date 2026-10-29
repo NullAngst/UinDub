@@ -93,7 +93,7 @@ Everything is in one script, the same one CI runs:
 bash packaging/build-appimage.sh
 ```
 
-It needs a C/C++ toolchain, Ninja, nasm, patchelf, autotools, curl, Python 3 with venv, the FFTW and Python build headers, and the X11/Wayland/OpenGL development packages. The apt line in `.github/workflows/build.yml` is the full list for Ubuntu. It downloads and builds the newest release of each dependency; nothing is pinned. `USE_SYSTEM_QT=1` and `SYSTEM_CODECS=1` use your distro's Qt and encoders instead, which is quicker for a local build.
+It needs GCC 12.3 or newer (VapourSynth builds kernels with `-march=znver4`; on Ubuntu 22.04 that means `apt install gcc-12 g++-12` and running with `CC=gcc-12 CXX=g++-12`), Ninja, nasm, patchelf, autotools, curl, Python 3 with venv, the FFTW and Python build headers, and the X11/Wayland/OpenGL development packages. The apt line in `.github/workflows/build.yml` is the full list for Ubuntu. It downloads and builds the newest release of each dependency; nothing is pinned. `USE_SYSTEM_QT=1` and `SYSTEM_CODECS=1` use your distro's Qt and encoders instead, which is quicker for a local build.
 
 For working on the code itself, a plain CMake build runs fine against distro FFmpeg and Qt:
 

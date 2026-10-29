@@ -14,12 +14,19 @@
 #   SKIP_TESTS=1        skip ctest
 #   SKIP_DEPS=1         reuse everything already in $WORK/prefix and $WORK/python
 #   JOBS=n              parallel jobs (default: all cores)
+#   CC=..., CXX=...     compilers for everything (default: cc, c++; must know -march=znver4)
 #   UPDATE_INFO=...     zsync update string (default: gh-releases-zsync for NullAngst/UinDub)
 set -euo pipefail
 export LC_ALL=C
 
+# Every build below takes the compiler from CC and CXX. CI sets gcc-12 and
+# g++-12 on Ubuntu 22.04: they know Zen 4, and 22.04's own libstdc++ comes
+# from GCC 12, so nothing they build needs a newer one than the host has.
+export CC=${CC:-cc}
+export CXX=${CXX:-c++}
+
 missing=()
-for c in git cc c++ make ninja pkg-config python3 curl nasm patchelf file autoreconf ldd find sort getconf; do
+for c in git "$CC" "$CXX" make ninja pkg-config python3 curl nasm patchelf file autoreconf ldd find sort getconf; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -27,6 +34,18 @@ if [ "${#missing[@]}" -gt 0 ]; then
     printf 'On Ubuntu: apt install build-essential ninja-build pkg-config python3-venv curl nasm patchelf file autoconf automake libtool\n' >&2
     exit 1
 fi
+
+# VapourSynth builds one set of kernels with -march=znver4. GCC learned Zen 4
+# in 12.3 (and 11.5), Clang in 16; Ubuntu 22.04's default GCC 11.4 did not.
+# Checked now so an old compiler fails here, not 40 minutes in.
+ZTEST=$(mktemp "${TMPDIR:-/tmp}/uindub-znver4.XXXXXX")
+trap 'rm -f -- "$ZTEST"' EXIT
+if ! printf 'int main(void) { return 0; }\n' | "$CXX" -march=znver4 -x c++ - -o "$ZTEST" >/dev/null 2>&1; then
+    printf '%s does not know -march=znver4, which VapourSynth needs.\n' "$CXX" >&2
+    printf 'Use GCC 12.3 or newer: on Ubuntu 22.04, apt install gcc-12 g++-12 and run with CC=gcc-12 CXX=g++-12.\n' >&2
+    exit 1
+fi
+printf 'Compilers: %s, %s\n' "$("$CC" --version | head -n 1)" "$("$CXX" --version | head -n 1)"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 WORK=${WORK:-$ROOT/build-appimage}
@@ -182,7 +201,7 @@ printf 'FFmpeg %s\n' "$TAG"
 fetch_tag https://github.com/FFmpeg/FFmpeg.git "$TAG" "$SRC/ffmpeg"
 (
     cd "$SRC/ffmpeg" || exit 1
-    ./configure --prefix="$PREFIX" --enable-gpl --enable-version3 --enable-shared --disable-static --disable-doc \
+    ./configure --prefix="$PREFIX" --cc="$CC" --cxx="$CXX" --enable-gpl --enable-version3 --enable-shared --disable-static --disable-doc \
         --disable-debug --disable-autodetect --disable-network --disable-ffplay --enable-zlib \
         --enable-libx264 --enable-libx265 --enable-libsvtav1 --enable-libopus --enable-libdav1d \
         --extra-cflags="-I$PREFIX/include" --extra-ldflags="-L$PREFIX/lib"
@@ -271,14 +290,14 @@ find "$PLUG_SRC/mvtools/build" -maxdepth 1 -name '*.so' -exec cp -- {} "$PLUGDIR
 TAG=$(latest_tag https://github.com/sekrit-twc/znedi3.git '^r[0-9]+(\.[0-9]+)*$')
 printf 'znedi3 %s\n' "$TAG"
 fetch_tag https://github.com/sekrit-twc/znedi3.git "$TAG" "$PLUG_SRC/znedi3"
-make -C "$PLUG_SRC/znedi3" -j"$JOBS" X86=1
+make -C "$PLUG_SRC/znedi3" -j"$JOBS" X86=1 CC="$CC" CXX="$CXX"
 cp -- "$PLUG_SRC/znedi3/vsznedi3.so" "$PLUG_SRC/znedi3/nnedi3_weights.bin" "$PLUGDIR/"
 
 TAG=$(latest_tag https://github.com/vapoursynth/vs-removegrain.git '^R[0-9]+$')
 printf 'removegrain %s\n' "$TAG"
 fetch_tag https://github.com/vapoursynth/vs-removegrain.git "$TAG" "$PLUG_SRC/removegrain"
 # shellcheck disable=SC2086  # PLUG_CXXFLAGS is a list of flags
-c++ -std=c++17 $PLUG_CXXFLAGS -shared -fPIC -I"$VSINC" "$PLUG_SRC"/removegrain/src/*.cpp -o "$PLUGDIR/libremovegrain.so"
+"$CXX" -std=c++17 $PLUG_CXXFLAGS -shared -fPIC -I"$VSINC" "$PLUG_SRC"/removegrain/src/*.cpp -o "$PLUGDIR/libremovegrain.so"
 
 TAG=$(latest_tag https://github.com/vapoursynth/vs-miscfilters-obsolete.git '^R[0-9]+$')
 printf 'miscfilters %s\n' "$TAG"
@@ -287,7 +306,7 @@ fetch_tag https://github.com/vapoursynth/vs-miscfilters-obsolete.git "$TAG" "$PL
 [ -d "$SRC/vapoursynth" ] || fetch_tag https://github.com/vapoursynth/vapoursynth.git \
     "$(latest_tag https://github.com/vapoursynth/vapoursynth.git '^R[0-9]+$')" "$SRC/vapoursynth"
 # shellcheck disable=SC2086
-c++ -std=c++17 $PLUG_CXXFLAGS -shared -fPIC -DVS_USE_LATEST_API -DVS_GRAPH_API -I"$VSINC" -I"$SRC/vapoursynth/src/core" \
+"$CXX" -std=c++17 $PLUG_CXXFLAGS -shared -fPIC -DVS_USE_LATEST_API -DVS_GRAPH_API -I"$VSINC" -I"$SRC/vapoursynth/src/core" \
     "$PLUG_SRC"/misc/src/*.cpp -o "$PLUGDIR/libmiscfilters.so"
 
 TAG=$(latest_tag https://github.com/EleonoreMizo/fmtconv.git '^r[0-9]+$')
