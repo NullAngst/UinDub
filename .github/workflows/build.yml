@@ -1,0 +1,73 @@
+name: Build AppImage
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    # Building on 22.04 keeps the glibc floor at 2.35, so the AppImage runs on
+    # Kubuntu and most distros from 2022 on. The container keeps runner image
+    # retirements from breaking the build.
+    container:
+      image: ubuntu:22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install git for checkout
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # the version string comes from git describe
+
+      - name: Trust the workspace for git describe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential ninja-build nasm pkg-config curl file patchelf python3 python3-venv \
+            autoconf automake libtool \
+            libffi-dev zlib1g-dev libssl-dev libbz2-dev liblzma-dev libsqlite3-dev uuid-dev \
+            libfftw3-dev \
+            libasound2-dev libdbus-1-dev \
+            libgl-dev libegl-dev libopengl-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libfontconfig1-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libxcb-xkb1 libxcb-xfixes0 libxcb-sync1 libxcb-shm0 libxcb-util1 libglib2.0-0 \
+            xvfb xauth zsync desktop-file-utils
+
+      # Everything from Qt to the AppImage lives in one script so it runs locally too.
+      - name: Build Qt, codecs, FFmpeg, Python, VapourSynth, QTGMC, UinDub; test; package
+        run: bash packaging/build-appimage.sh
+
+      - name: AppImage smoke test
+        run: |
+          ./UinDub-x86_64.AppImage --appimage-extract-and-run --version
+          ./UinDub-x86_64.AppImage --appimage-extract-and-run --self-test --verbose
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UinDub-x86_64
+          path: |
+            UinDub-x86_64.AppImage
+            UinDub-x86_64.AppImage.zsync
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            UinDub-x86_64.AppImage
+            UinDub-x86_64.AppImage.zsync
