@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QPalette>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QStyleFactory>
 #include <QStyleHints>
 
@@ -124,6 +125,34 @@ void ThemeManager::apply(const QString& idIn) {
     tok["accenttext"] = accent.lightness() > 150 ? "#000000" : "#FFFFFF";
     tok["accent2"] = accent2.name();
     if (!tok.contains("radius")) tok["radius"] = "4";
+    // Arrows for spin box and combo box buttons. A stylesheet that styles the
+    // frame has to style the buttons too, and their arrows need images, so a
+    // chevron in this theme's text color (and a muted one for disabled) is
+    // written to the cache once per color.
+    {
+        const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation) + "/uindub/theme";
+        QDir().mkpath(dir);
+        auto chevron = [&](const QString& color, bool up) {
+            const QString name = QString("%1/chevron-%2-%3.svg").arg(dir, up ? "up" : "down", QString(color).remove('#'));
+            if (!QFile::exists(name)) {
+                QFile f(name);
+                if (f.open(QIODevice::WriteOnly)) {
+                    const char* d = up ? "M1.5 6 L6 1.5 L10.5 6" : "M1.5 1.5 L6 6 L10.5 1.5";
+                    f.write(QString("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"8\" viewBox=\"0 0 12 8\">"
+                                    "<path d=\"%1\" fill=\"none\" stroke=\"%2\" stroke-width=\"1.8\" stroke-linecap=\"round\" "
+                                    "stroke-linejoin=\"round\"/></svg>\n")
+                                .arg(d, color)
+                                .toUtf8());
+                }
+            }
+            return name;
+        };
+        const QString on = text.name(), off = mix(text, window, 0.55);
+        tok["arrowup"] = chevron(on, true);
+        tok["arrowdown"] = chevron(on, false);
+        tok["arrowupoff"] = chevron(off, true);
+        tok["arrowdownoff"] = chevron(off, false);
+    }
     QString qss = m_qss;
     for (auto it = tok.begin(); it != tok.end(); ++it) qss.replace("${" + it.key() + "}", it.value());
 

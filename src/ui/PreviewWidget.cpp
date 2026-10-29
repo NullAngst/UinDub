@@ -173,6 +173,7 @@ QPointF PreviewWidget::toWidget(double x, double y) const {
 
 void PreviewWidget::upload(int set, const PreviewFrame& f) {
     const std::vector<uint8_t>* planes[3] = {set ? &f.sy : &f.y, set ? &f.su : &f.u, set ? &f.sv : &f.v};
+    glActiveTexture(GL_TEXTURE0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     for (int i = 0; i < 3; ++i) {
         const int idx = set * 3 + i;
@@ -231,6 +232,15 @@ void PreviewWidget::paintGL() {
         m_prog.release();
         glViewport(0, 0, int(width() * dpr), int(height() * dpr));
     }
+    // Hand the GL state back the way QPainter expects it. Its text is drawn
+    // from a glyph texture on unit 1, and it trusts that nothing rebound that
+    // unit; left alone, the labels sample a chroma plane and come out as noise.
+    for (int i = 5; i >= 0; --i) {
+        glActiveTexture(GL_TEXTURE0 + unsigned(i));
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     painter.endNativePainting();
     if (!have) {
         painter.setPen(QColor(0xE0, 0xE0, 0xE0));
