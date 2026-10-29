@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=UinDub
+GenericName=Capture post-processor
+Comment=Edge Lock software TBC, deinterlacing, color, crop, cuts and encoding for PingDub captures
+Exec=uindub %f
+Icon=io.github.nullangst.UinDub
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=VHS;capture;deinterlace;QTGMC;TBC;PingDub;
+MimeType=video/x-matroska;video/x-msvideo;video/quicktime;video/mp4;
+StartupWMClass=uindub

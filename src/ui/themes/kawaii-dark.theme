@@ -1,0 +1,12 @@
+# UinDub theme tokens (PingDub's format). Copy this file, change the values, drop it in
+# ~/.config/uindub/themes/ and it shows up in Preferences. No code needed.
+[theme]
+name=Kawaii Dark
+base=dark
+window=#221A24
+panel=#2D2330
+text=#F7E9F2
+accent=#FF8DC7
+accent2=#B59CFF
+ok=#5FCFB4
+radius=10

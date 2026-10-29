@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- UinDub icon: a tape frame whose left edge has been pulled straight. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect x="8" y="8" width="240" height="240" rx="36" fill="#13201E"/>
+  <rect x="40" y="56" width="176" height="144" rx="6" fill="#1B2E2B" stroke="#43B3A0" stroke-width="6"/>
+  <path d="M64 70 q10 14 0 29 q-10 14 0 29 q10 14 0 29 q-10 14 0 29" fill="none" stroke="#B87333" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+  <line x1="92" y1="70" x2="92" y2="186" stroke="#43B3A0" stroke-width="8" stroke-linecap="round"/>
+  <rect x="110" y="78" width="16" height="100" rx="3" fill="#DCEBE6"/>
+  <rect x="140" y="78" width="16" height="100" rx="3" fill="#DCEBE6" opacity="0.75"/>
+  <rect x="170" y="78" width="16" height="100" rx="3" fill="#DCEBE6" opacity="0.5"/>
+</svg>

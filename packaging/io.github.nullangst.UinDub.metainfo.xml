@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.nullangst.UinDub</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>UinDub</name>
+  <summary>Post-processing for PingDub captures</summary>
+  <description>
+    <p>UinDub takes a PingDub master, or any interlaced SD file, and turns it into a watchable file: Edge Lock (a software
+    time base corrector that straightens jittery lines), QTGMC or bwdif deinterlacing, IVTC for film, color and levels,
+    free crop, trims and cuts with chapters and captions kept in place, and x265, x264 or SVT-AV1 encoding.</p>
+  </description>
+  <launchable type="desktop-id">io.github.nullangst.UinDub.desktop</launchable>
+  <url type="homepage">https://github.com/NullAngst/UinDub</url>
+  <developer id="io.github.nullangst">
+    <name>Zachary</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+</component>

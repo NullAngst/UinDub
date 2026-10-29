@@ -1,0 +1,173 @@
+/* One stylesheet for every theme. ${name} placeholders come from the
+   theme's token file; derived tokens (border, muted, hover, pressed,
+   accenttext) are computed from them. */
+
+QMainWindow, QDialog {
+    background: ${window};
+}
+
+QWidget {
+    color: ${text};
+}
+
+QMenuBar, QMenu {
+    background: ${panel};
+    color: ${text};
+}
+QMenu::item:selected, QMenuBar::item:selected {
+    background: ${accent};
+    color: ${accenttext};
+}
+
+QGroupBox {
+    background: ${panel};
+    border: 1px solid ${border};
+    border-radius: ${radius}px;
+    margin-top: 1.4em;
+    padding: 8px 6px 6px 6px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
+    color: ${muted};
+}
+
+QFrame#sidePanel, QFrame#bottomPanel, QFrame#statsStrip {
+    background: ${panel};
+    border: 1px solid ${border};
+    border-radius: ${radius}px;
+}
+
+QLabel#panelLabel, QLabel#statKey {
+    color: ${muted};
+}
+
+QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox, QKeySequenceEdit, QPlainTextEdit, QTextEdit, QListWidget {
+    background: ${window};
+    border: 1px solid ${border};
+    border-radius: ${radius}px;
+    padding: 3px 6px;
+    selection-background-color: ${accent};
+    selection-color: ${accenttext};
+}
+QComboBox:disabled, QLineEdit:disabled, QSpinBox:disabled {
+    color: ${muted};
+}
+QComboBox QAbstractItemView {
+    background: ${panel};
+    selection-background-color: ${accent};
+    selection-color: ${accenttext};
+}
+
+QPushButton {
+    background: ${panel};
+    border: 1px solid ${border};
+    border-radius: ${radius}px;
+    padding: 5px 12px;
+}
+QPushButton:hover {
+    background: ${hover};
+}
+QPushButton:pressed {
+    background: ${pressed};
+}
+QPushButton:disabled {
+    color: ${muted};
+}
+QPushButton#captureButton {
+    background: ${accent};
+    color: ${accenttext};
+    font-weight: bold;
+    border: none;
+    padding: 10px 18px;
+}
+QPushButton#captureButton:disabled {
+    background: ${border};
+    color: ${muted};
+}
+QPushButton#captureButton[capturing="true"] {
+    background: #D73A49;
+    color: #FFFFFF;
+}
+
+QSlider::groove:horizontal {
+    height: 4px;
+    background: ${border};
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: ${accent};
+    width: 14px;
+    margin: -6px 0;
+    border-radius: 7px;
+}
+QSlider::sub-page:horizontal {
+    background: ${accent2};
+    border-radius: 2px;
+}
+
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background: ${accent};
+    border: 1px solid ${accent};
+    border-radius: 3px;
+}
+
+QTabWidget::pane {
+    border: 1px solid ${border};
+    border-radius: ${radius}px;
+    background: ${panel};
+}
+QTabBar::tab {
+    background: ${window};
+    border: 1px solid ${border};
+    padding: 5px 12px;
+    border-top-left-radius: ${radius}px;
+    border-top-right-radius: ${radius}px;
+}
+QTabBar::tab:selected {
+    background: ${panel};
+    color: ${accent};
+}
+
+QFrame#banner {
+    background: #3D2E00;
+    border: 1px solid #D29922;
+    border-radius: ${radius}px;
+}
+QFrame#banner QLabel {
+    color: #F2CC60;
+}
+
+QToolTip {
+    background: ${panel};
+    color: ${text};
+    border: 1px solid ${border};
+}
+
+/* UinDub: the one big action on a tab (Analyze, Render). */
+QPushButton#primaryButton {
+    background: ${accent};
+    color: ${accenttext};
+    font-weight: bold;
+    border: none;
+    padding: 8px 16px;
+}
+QPushButton#primaryButton:disabled {
+    background: ${border};
+    color: ${muted};
+}
+QPushButton#primaryButton[running="true"] {
+    background: #D73A49;
+    color: #FFFFFF;
+}
+QLabel#note {
+    color: ${muted};
+}
+QLabel#warn {
+    color: #D29922;
+}
+QDockWidget::title {
+    background: ${panel};
+    padding: 4px;
+}

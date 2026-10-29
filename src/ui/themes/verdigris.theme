@@ -1,0 +1,13 @@
+# UinDub theme tokens (PingDub's format). Copy this file, change the values, drop it in
+# ~/.config/uindub/themes/ and it shows up in Preferences. No code needed.
+# Verdigris: weathered copper, the blue-green patina over a dark bronze.
+[theme]
+name=Verdigris
+base=dark
+window=#13201E
+panel=#1B2E2B
+text=#DCEBE6
+accent=#43B3A0
+accent2=#B87333
+ok=#3FB950
+radius=4
