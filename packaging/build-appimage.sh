@@ -276,9 +276,11 @@ mkdir -p "$PLUGDIR"
 export PKG_CONFIG_PATH=$VSPKG/pkgconfig:$PKG_CONFIG_PATH
 PLUG_SRC=$SRC/plugins
 mkdir -p "$PLUG_SRC"
-# Newer GCC no longer pulls <cmath> and <cfloat> in through other headers,
-# which some of these sources rely on.
-PLUG_CXXFLAGS="-O2 -include math.h -include cfloat"
+# Some of these sources use names from headers they never include (math.h,
+# <cfloat>, <cstddef> for std::max_align_t, <cstdint>), counting on other
+# headers to drag them in. Which ones do that changes with each GCC, so they
+# are forced in for every compiler.
+PLUG_CXXFLAGS="-O2 -include math.h -include cfloat -include cstddef -include cstdint -include cstring"
 
 TAG=$(latest_tag https://github.com/dubhater/vapoursynth-mvtools.git '^v[0-9]+(_[0-9]+)?$')
 printf 'mvtools %s\n' "$TAG"
