@@ -26,12 +26,12 @@ export CC=${CC:-cc}
 export CXX=${CXX:-c++}
 
 missing=()
-for c in git "$CC" "$CXX" make ninja pkg-config python3 curl nasm patchelf file autoreconf ldd find sort getconf; do
+for c in git "$CC" "$CXX" make ninja pkg-config python3 curl nasm patchelf file autoreconf ldd find sort getconf rsvg-convert; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
     printf 'Missing commands: %s\n' "${missing[*]}" >&2
-    printf 'On Ubuntu: apt install build-essential ninja-build pkg-config python3-venv curl nasm patchelf file autoconf automake libtool\n' >&2
+    printf 'On Ubuntu: apt install build-essential ninja-build pkg-config python3-venv curl nasm patchelf file autoconf automake libtool librsvg2-bin\n' >&2
     exit 1
 fi
 
@@ -405,7 +405,9 @@ for t in linuxdeploy/linuxdeploy/linuxdeploy-x86_64.AppImage \
          linuxdeploy/linuxdeploy-plugin-qt/linuxdeploy-plugin-qt-x86_64.AppImage \
          AppImage/appimagetool/appimagetool-x86_64.AppImage; do
     f=$TOOLS/${t##*/}
-    [ -s "$f" ] || curl -fsSL -o "$f" "https://github.com/${t%/*}/releases/download/continuous/${t##*/}"
+    # Fetched fresh every run, the same as CI, so a local build never packages
+    # with a stale tool that behaves differently.
+    curl -fsSL -o "$f" "https://github.com/${t%/*}/releases/download/continuous/${t##*/}"
     chmod +x "$f"
 done
 # Containers have no FUSE: run the tool AppImages extracted.
@@ -511,6 +513,19 @@ fi
 printf 'AppDir check passed: no libasound, libudev, libGL, libEGL, libdbus-1 or libc inside.\n'
 
 # --- AppImage with the static runtime and update info -----------------------------
+# --- AppImage icon ----------------------------------------------------------------
+# appimagetool wants a PNG (or XPM) named after the desktop file's Icon= next
+# to it, and a .DirIcon that is a real image; current builds no longer make
+# one from an SVG. Rendered from the SVG, so that stays the only icon source.
+step "Icon"
+ICON_ID=io.github.nullangst.UinDub
+mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+rsvg-convert -w 256 -h 256 -o "$APPDIR/usr/share/icons/hicolor/256x256/apps/$ICON_ID.png" "$ROOT/packaging/uindub.svg"
+rm -f -- "$APPDIR/$ICON_ID.png" "$APPDIR/.DirIcon"
+cp -- "$APPDIR/usr/share/icons/hicolor/256x256/apps/$ICON_ID.png" "$APPDIR/$ICON_ID.png"
+cp -- "$APPDIR/$ICON_ID.png" "$APPDIR/.DirIcon"
+file -- "$APPDIR/.DirIcon"
+
 step "AppImage"
 VERSION=$(git -C "$ROOT" describe --tags --always 2>/dev/null | sed 's/^v//' || printf 'dev')
 export VERSION
