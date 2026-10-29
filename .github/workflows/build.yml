@@ -36,7 +36,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get install -y --no-install-recommends \
-            build-essential ninja-build nasm pkg-config curl file patchelf python3 python3-venv \
+            build-essential gcc-12 g++-12 ninja-build nasm pkg-config curl file patchelf python3 python3-venv \
             autoconf automake libtool \
             libffi-dev zlib1g-dev libssl-dev libbz2-dev liblzma-dev libsqlite3-dev uuid-dev \
             libfftw3-dev \
@@ -48,7 +48,13 @@ jobs:
             xvfb xauth zsync desktop-file-utils
 
       # Everything from Qt to the AppImage lives in one script so it runs locally too.
+      # GCC 12: VapourSynth needs -march=znver4, which 22.04's default GCC 11.4
+      # lacks. 22.04's own libstdc++ is built from GCC 12, so the AppImage
+      # still runs on a stock 22.04.
       - name: Build Qt, codecs, FFmpeg, Python, VapourSynth, QTGMC, UinDub; test; package
+        env:
+          CC: gcc-12
+          CXX: g++-12
         run: bash packaging/build-appimage.sh
 
       - name: AppImage smoke test
