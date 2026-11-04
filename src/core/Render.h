@@ -34,6 +34,7 @@ struct RenderOutcome {
     bool cancelled = false;
     std::string error;
     std::string outPath, sidecar;
+    std::vector<std::string> contactSheets;  // JPEG pages, empty when off
     int64_t videoFrames = 0, audioSamples = 0;
     double seconds = 0;
     std::vector<std::string> notes;

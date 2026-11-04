@@ -24,11 +24,20 @@ struct OutputGeometry {
     int croppedWidth = 0;       // before the resize
     Rational sar{1, 1};
     bool resize = false;
-    std::vector<std::string> notes;  // what got snapped and why
+    // The final scale (Output > Resize): the frame postProcess hands over is
+    // preWidth x preHeight, and swscale takes it to width x height.
+    bool scale = false;
+    int preWidth = 0, preHeight = 0;
+    ColorStd color = ColorStd::Smpte170m;  // what the output is tagged
+    std::vector<std::string> notes;        // what got snapped and why
 };
 // Crop snapped to what the output can hold: even width and height for 4:2:0,
 // even width for 4:2:2, even top and bottom when the output stays interlaced.
 OutputGeometry outputGeometry(const Project& p, const SourceInfo& s, AVPixelFormat encoderFormat);
+
+// The final scale with swscale, converting the matrix when the tag changes.
+// Safe to call from several threads at once.
+FramePtr scaleFrame(const AVFrame* in, const OutputGeometry& g, const std::string& scaler, ColorStd from);
 
 // Decode, then Edge Lock (when it is on and analyzed), into the working buffer.
 class InputStage {

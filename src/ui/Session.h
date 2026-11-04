@@ -53,6 +53,8 @@ public:
     void saveNow();
     void reloadAnalysis();
     void rerunFieldCheck();
+    // A field order check run elsewhere (the Analyze tab runs it in the background).
+    void setFieldCheck(const FieldOrderCheck& c);
 
     int64_t frame() const { return m_frame; }
     int field() const { return m_field; }

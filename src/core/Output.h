@@ -22,6 +22,11 @@ VideoCodec videoCodecFromName(const std::string& s);
 const char* audioCodecName(AudioCodec c);
 AudioCodec audioCodecFromName(const std::string& s);
 
+// Whether this FFmpeg build has the encoder, checked once.
+bool videoCodecAvailable(VideoCodec c);
+bool audioCodecAvailable(AudioCodec c);
+const char* videoEncoderName(VideoCodec c);
+
 int rfMax(VideoCodec c);
 int rfDefault(VideoCodec c);
 std::string presetDefault(VideoCodec c);
@@ -40,6 +45,13 @@ struct OutputSettings {
     std::string name;                // "" means "<source name>.uindub"
     bool chapters = true;
     bool captions = true;
+    // Final scale: 0 keeps the size, else the output height (720, 1080, 1440,
+    // 2160) at the picture's display aspect with square pixels.
+    int scaleHeight = 0;
+    std::string scaler = "lanczos";  // lanczos, spline, bicubic
+    // Contact sheet of the finished file next to it.
+    bool contactSheet = true;
+    int contactInterval = 30;  // seconds between thumbnails
     bool operator==(const OutputSettings& o) const;
 };
 
@@ -51,6 +63,15 @@ OutputSettings effectiveOutput(const OutputSettings& o);
 // "<source name>.uindub": the output name when none is set.
 std::string defaultOutputName(const SourceInfo& s);
 std::string outputPath(const OutputSettings& o, const SourceInfo& s);
+// Scaler names the Output tab offers, and the swscale flag for one.
+std::vector<std::string> scalerNames();
+int scalerFlags(const std::string& name);
+
+// Ready-made settings for an upload. YouTube's own recommendation is H.264
+// in MP4 with AAC-LC at 384 kb/s; AV1 goes in only when asked for, and only
+// when this build has SVT-AV1.
+enum class UploadPreset { YouTube1080, YouTube2160, YouTube1080Av1, YouTube2160Av1 };
+void applyUploadPreset(OutputSettings& o, UploadPreset p);
 
 struct MuxVideo {
     int width = 0, height = 0;

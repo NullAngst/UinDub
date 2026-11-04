@@ -25,7 +25,8 @@ FieldOrder fieldOrderFromName(const std::string& s);
 // Parity 0 is the top field (frame lines 0, 2, 4, ...).
 inline int firstParity(FieldOrder f) { return f == FieldOrder::BFF ? 1 : 0; }
 
-enum class ColorStd { Smpte170m, Bt470bg };
+// Bt709 is only ever an output tag: an HD upscale converts the matrix to it.
+enum class ColorStd { Smpte170m, Bt470bg, Bt709 };
 
 // "HH:MM:SS.mmm"
 std::string clockString(double seconds);

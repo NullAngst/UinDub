@@ -122,6 +122,8 @@ bool AudioCutter::open(const SourceInfo& src, const AudioPlan& plan, std::string
     m_plan = plan;
     m_channels = std::max(1, src.channels);
     m_out = 0;
+    m_xfJoin = -1;
+    m_xf.clear();
     return m_reader.open(src, err);
 }
 
@@ -157,19 +159,26 @@ bool AudioCutter::next(int64_t count, std::vector<int32_t>& out) {
         const size_t j = size_t(join);
         const int64_t regStart = J[j] - H, regEnd = std::min(stop, J[j] + H);
         const int64_t n = regEnd - o;
-        // A runs on past the end of the earlier part into the cut; B starts
-        // inside the cut before the later part. Both are real tape.
-        if (!m_reader.read(m_plan.parts[j - 1].end + (o - J[j]), n, a)) return false;
-        if (!m_reader.read(m_plan.parts[j].start + (o - J[j]), n, b)) return false;
-        for (int64_t i = 0; i < n; ++i) {
-            const double t = (double(o + i - regStart) + 0.5) / double(2 * H);
-            const double gb = std::sin(0.5 * M_PI * t) * std::sin(0.5 * M_PI * t), ga = 1.0 - gb;
-            for (int c = 0; c < m_channels; ++c) {
-                const size_t idx = size_t(i) * size_t(m_channels) + size_t(c);
-                const double v = ga * a[idx] + gb * b[idx];
-                out.push_back(int32_t(std::clamp(std::lround(v), -2147483648L, 2147483647L)));
+        if (m_xfJoin != join) {
+            // A runs on past the end of the earlier part into the cut; B starts
+            // inside the cut before the later part. Both are real tape.
+            const int64_t len = 2 * H;
+            if (!m_reader.read(m_plan.parts[j - 1].end - H, len, a)) return false;
+            if (!m_reader.read(m_plan.parts[j].start - H, len, b)) return false;
+            m_xf.assign(size_t(len) * size_t(m_channels), 0);
+            for (int64_t i = 0; i < len; ++i) {
+                const double t = (double(i) + 0.5) / double(len);
+                const double gb = std::sin(0.5 * M_PI * t) * std::sin(0.5 * M_PI * t), ga = 1.0 - gb;
+                for (int c = 0; c < m_channels; ++c) {
+                    const size_t idx = size_t(i) * size_t(m_channels) + size_t(c);
+                    const double v = ga * a[idx] + gb * b[idx];
+                    m_xf[idx] = int32_t(std::clamp(std::lround(v), -2147483648L, 2147483647L));
+                }
             }
+            m_xfJoin = join;
         }
+        const size_t from = size_t(o - regStart) * size_t(m_channels);
+        out.insert(out.end(), m_xf.begin() + long(from), m_xf.begin() + long(from + size_t(n) * size_t(m_channels)));
         o += n;
     }
     m_out = stop;

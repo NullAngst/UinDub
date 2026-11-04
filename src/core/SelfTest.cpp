@@ -5,6 +5,7 @@
 #include "Av.h"
 #include "Edit.h"
 #include "Qtgmc.h"
+#include "Output.h"
 #include "Render.h"
 #include "Synth.h"
 #include "Warble.h"
@@ -134,9 +135,31 @@ int runSelfTest(bool verbose) {
             c.check(back.frames == wantFrames, fmt("output file has %.0f frames, want %.0f", double(back.frames), double(wantFrames)));
             c.check(fs::exists(o.sidecar), "sidecar written: " + o.sidecar);
         }
+        c.check(!o.contactSheets.empty() && fs::exists(o.contactSheets.front()), "contact sheet written");
     };
 
     renderOnce("render bwdif x265", DeintMode::Bwdif, "Draft", VideoCodec::X265, "fast");
+
+    // The upload path: scaled to 1080p in MP4 with AAC, BT.709 tags.
+    {
+        c.step("render bwdif 1080p MP4");
+        RenderJob rj;
+        rj.project = base;
+        rj.project.deint.mode = DeintMode::Bwdif;
+        rj.project.deint.doubleRate = false;
+        applyUploadPreset(rj.project.out, UploadPreset::YouTube1080);
+        rj.project.out.preset = "ultrafast";
+        rj.source = src;
+        rj.outPath = (dir / "upload_1080.mp4").string();
+        const RenderOutcome o = runRender(rj);
+        if (c.check(o.ok, "1080p render: " + o.error)) {
+            SourceInfo back;
+            if (c.check(probeSource(o.outPath, false, back, err), "1080p output probes: " + err)) {
+                c.check(back.height == 1080, fmt("1080p output is %.0f lines high", double(back.height)));
+                c.check(back.sar.num == back.sar.den, "1080p output has square pixels");
+            }
+        }
+    }
 
     const VsRuntimeInfo& rt = vapoursynthRuntime();
     if (!rt.ok) {

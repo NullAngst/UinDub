@@ -10,6 +10,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 }
 
 namespace ud {
@@ -50,6 +51,52 @@ AudioCodec audioCodecFromName(const std::string& s) {
     return AudioCodec::Flac;
 }
 
+const char* videoEncoderName(VideoCodec c) {
+    switch (c) {
+    case VideoCodec::X265: return "libx265";
+    case VideoCodec::X264: return "libx264";
+    case VideoCodec::SvtAv1: return "libsvtav1";
+    case VideoCodec::Ffv1: return "ffv1";
+    }
+    return "libx265";
+}
+
+bool videoCodecAvailable(VideoCodec c) { return avcodec_find_encoder_by_name(videoEncoderName(c)) != nullptr; }
+
+bool audioCodecAvailable(AudioCodec c) {
+    switch (c) {
+    case AudioCodec::Flac: return avcodec_find_encoder(AV_CODEC_ID_FLAC) != nullptr;
+    case AudioCodec::Opus: return avcodec_find_encoder_by_name("libopus") != nullptr;
+    case AudioCodec::Aac: return avcodec_find_encoder(AV_CODEC_ID_AAC) != nullptr;
+    case AudioCodec::Copy: return avcodec_find_encoder(AV_CODEC_ID_PCM_S16LE) != nullptr;
+    }
+    return false;
+}
+
+std::vector<std::string> scalerNames() { return {"lanczos", "spline", "bicubic"}; }
+
+int scalerFlags(const std::string& n) {
+    int f = SWS_LANCZOS;
+    if (n == "spline") f = SWS_SPLINE;
+    else if (n == "bicubic") f = SWS_BICUBIC;
+    return f | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP;
+}
+
+void applyUploadPreset(OutputSettings& o, UploadPreset p) {
+    const bool av1 = (p == UploadPreset::YouTube1080Av1 || p == UploadPreset::YouTube2160Av1) && videoCodecAvailable(VideoCodec::SvtAv1);
+    o.scaleHeight = (p == UploadPreset::YouTube2160 || p == UploadPreset::YouTube2160Av1) ? 2160 : 1080;
+    o.scaler = "lanczos";
+    o.codec = av1 ? VideoCodec::SvtAv1 : VideoCodec::X264;
+    // Quality well above what YouTube keeps, since it encodes everything again.
+    o.rf = av1 ? 22 : 16;
+    o.preset = av1 ? "5" : "slow";
+    o.chroma422 = false;
+    o.mp4 = true;
+    o.audio = AudioCodec::Aac;
+    o.aacKbps = 384;
+    o.chapters = true;
+}
+
 int rfMax(VideoCodec c) { return c == VideoCodec::SvtAv1 ? 63 : (c == VideoCodec::Ffv1 ? 0 : 51); }
 int rfDefault(VideoCodec c) {
     switch (c) {
@@ -72,7 +119,8 @@ std::vector<std::string> presetsFor(VideoCodec c) {
 
 bool OutputSettings::operator==(const OutputSettings& o) const {
     return codec == o.codec && rf == o.rf && preset == o.preset && chroma422 == o.chroma422 && audio == o.audio && opusKbps == o.opusKbps &&
-           aacKbps == o.aacKbps && mp4 == o.mp4 && folder == o.folder && name == o.name && chapters == o.chapters && captions == o.captions;
+           aacKbps == o.aacKbps && mp4 == o.mp4 && folder == o.folder && name == o.name && chapters == o.chapters && captions == o.captions &&
+           scaleHeight == o.scaleHeight && scaler == o.scaler && contactSheet == o.contactSheet && contactInterval == o.contactInterval;
 }
 
 OutputSettings effectiveOutput(const OutputSettings& in) {
@@ -140,6 +188,37 @@ struct OutputWriter::Impl {
     FieldOrder field = FieldOrder::Progressive;
     bool headerWritten = false;
     std::string path;
+    // Caption cues waiting for the picture to reach them. Writing them all up
+    // front leaves a packet far in the future queued in the muxer, which
+    // defeats its interleaving: audio then lands in the file ahead of the
+    // video by the whole encoder delay, and players stutter and drop audio.
+    struct PendingCue {
+        double start = 0, end = 0;
+        std::string text;
+        AVStream* st = nullptr;
+    };
+    std::vector<PendingCue> cues;  // sorted by start
+    size_t nextCue = 0;
+    double fps = 30000.0 / 1001.0;
+
+    bool writeCuesUpTo(double t, std::string& err) {
+        while (nextCue < cues.size() && cues[nextCue].start <= t) {
+            const PendingCue& c = cues[nextCue++];
+            PacketPtr p = makePacket();
+            if (av_new_packet(p.get(), int(c.text.size())) < 0) continue;
+            std::memcpy(p->data, c.text.data(), c.text.size());
+            p->pts = p->dts = av_rescale_q(int64_t(std::llround(c.start * 1000.0)), AVRational{1, 1000}, c.st->time_base);
+            p->duration = av_rescale_q(int64_t(std::llround((c.end - c.start) * 1000.0)), AVRational{1, 1000}, c.st->time_base);
+            p->stream_index = c.st->index;
+            p->flags |= AV_PKT_FLAG_KEY;
+            const int w = av_interleaved_write_frame(oc, p.get());
+            if (w < 0) {
+                err = "write: " + avError(w);
+                return false;
+            }
+        }
+        return true;
+    }
 
     ~Impl() {
         if (oc) {
@@ -234,13 +313,7 @@ bool OutputWriter::open(const std::string& path, const OutputSettings& oIn, cons
     }
 
     // --- video
-    const char* encName = nullptr;
-    switch (o.codec) {
-    case VideoCodec::X265: encName = "libx265"; break;
-    case VideoCodec::X264: encName = "libx264"; break;
-    case VideoCodec::SvtAv1: encName = "libsvtav1"; break;
-    case VideoCodec::Ffv1: encName = "ffv1"; break;
-    }
+    const char* encName = videoEncoderName(o.codec);
     const AVCodec* vcodec = avcodec_find_encoder_by_name(encName);
     if (!vcodec) {
         err = std::string("this build has no ") + encName + " encoder";
@@ -255,7 +328,11 @@ bool OutputWriter::open(const std::string& path, const OutputSettings& oIn, cons
     vc->framerate = AVRational{v.fps.num, v.fps.den};
     vc->sample_aspect_ratio = AVRational{v.sar.num, v.sar.den};
     vc->color_range = AVCOL_RANGE_MPEG;
-    if (v.color == ColorStd::Bt470bg) {
+    if (v.color == ColorStd::Bt709) {
+        vc->color_primaries = AVCOL_PRI_BT709;
+        vc->color_trc = AVCOL_TRC_BT709;
+        vc->colorspace = AVCOL_SPC_BT709;
+    } else if (v.color == ColorStd::Bt470bg) {
         vc->color_primaries = AVCOL_PRI_BT470BG;
         vc->color_trc = AVCOL_TRC_GAMMA28;
         vc->colorspace = AVCOL_SPC_BT470BG;
@@ -265,6 +342,7 @@ bool OutputWriter::open(const std::string& path, const OutputSettings& oIn, cons
         vc->colorspace = AVCOL_SPC_SMPTE170M;
     }
     vc->chroma_sample_location = AVCHROMA_LOC_LEFT;
+    if (o.mp4 && o.codec == VideoCodec::X264 && !o.chroma422) vc->profile = AV_PROFILE_H264_HIGH;  // what YouTube asks for
     vc->field_order = v.field == FieldOrder::TFF ? AV_FIELD_TT : (v.field == FieldOrder::BFF ? AV_FIELD_BB : AV_FIELD_PROGRESSIVE);
     vc->thread_count = 0;
     if (I.oc->oformat->flags & AVFMT_GLOBALHEADER) vc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -410,22 +488,15 @@ bool OutputWriter::open(const std::string& path, const OutputSettings& oIn, cons
     }
     I.headerWritten = true;
 
-    // Caption packets go in up front; the interleaver sorts them in.
+    // Caption packets go in as the picture reaches them (see PendingCue).
+    I.fps = v.fps.toDouble() > 0 ? v.fps.toDouble() : I.fps;
     size_t si = 0;
     for (const OutputCaptionTrack& t : captions) {
         if (t.cues.empty() || si >= I.subs.size()) continue;
         AVStream* s = I.subs[si++];
-        for (const Caption& c : t.cues) {
-            PacketPtr p = makePacket();
-            if (av_new_packet(p.get(), int(c.text.size())) < 0) continue;
-            std::memcpy(p->data, c.text.data(), c.text.size());
-            p->pts = p->dts = av_rescale_q(int64_t(std::llround(c.start * 1000.0)), AVRational{1, 1000}, s->time_base);
-            p->duration = av_rescale_q(int64_t(std::llround((c.end - c.start) * 1000.0)), AVRational{1, 1000}, s->time_base);
-            p->stream_index = s->index;
-            p->flags |= AV_PKT_FLAG_KEY;
-            av_interleaved_write_frame(I.oc, p.get());
-        }
+        for (const Caption& c : t.cues) I.cues.push_back({c.start, c.end, c.text, s});
     }
+    std::stable_sort(I.cues.begin(), I.cues.end(), [](const Impl::PendingCue& a, const Impl::PendingCue& b) { return a.start < b.start; });
     return true;
 }
 
@@ -446,7 +517,8 @@ bool OutputWriter::writeVideo(AVFrame* f, std::string& err) {
         err = "video encoder: " + avError(r);
         return false;
     }
-    return I.drain(I.vc.get(), I.vs, err);
+    if (!I.drain(I.vc.get(), I.vs, err)) return false;
+    return I.writeCuesUpTo(double(I.vframes) / I.fps, err);
 }
 
 bool OutputWriter::writeAudio(const std::vector<int32_t>& samples, std::string& err) {
@@ -473,6 +545,7 @@ bool OutputWriter::finish(std::string& err) {
         }
         if (avcodec_send_frame(I.ac.get(), nullptr) < 0 || !I.drain(I.ac.get(), I.as, err)) return false;
     }
+    if (!I.writeCuesUpTo(1e300, err)) return false;
     const int r = av_write_trailer(I.oc);
     if (r < 0) {
         err = "cannot finish the file: " + avError(r);

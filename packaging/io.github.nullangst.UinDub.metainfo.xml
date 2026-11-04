@@ -9,6 +9,8 @@
     <p>UinDub takes a PingDub master, or any interlaced SD file, and turns it into a watchable file: Edge Lock (a software
     time base corrector that straightens jittery lines), QTGMC or bwdif deinterlacing, IVTC for film, color and levels,
     free crop, trims and cuts with chapters and captions kept in place, and x265, x264 or SVT-AV1 encoding.</p>
+    <p>An Analyze tab runs field order, film cadence, black border, level and loudness checks in one go. Output can be
+    scaled to 1080p or 4K for uploading, and each render gets a contact sheet with the tape's title and runtime.</p>
   </description>
   <launchable type="desktop-id">io.github.nullangst.UinDub.desktop</launchable>
   <url type="homepage">https://github.com/NullAngst/UinDub</url>

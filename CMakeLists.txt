@@ -37,7 +37,7 @@ if(UINDUB_LTO AND CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavformat libavfilter libavutil)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavformat libavfilter libavutil libswscale)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 find_package(Threads REQUIRED)
 
@@ -103,7 +103,7 @@ if(UINDUB_BUILD_TESTS)
     target_include_directories(uindub_testutil INTERFACE tests src)
     target_link_libraries(uindub_testutil INTERFACE uindub_core)
     set(UINDUB_TESTS neutral jitter_synth real_motion dark occlusion cut subpixel field_order pingdub_inputs output color
-        offsets_store cuts qtgmc pal warble)
+        offsets_store cuts qtgmc pal warble upload detect)
     foreach(t ${UINDUB_TESTS})
         if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_${t}.cpp)
             message(WARNING "tests/test_${t}.cpp is missing")

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "Render.h"
 
+#include "ContactSheet.h"
 #include "Deinterlace.h"
 #include "Edit.h"
 #include "Output.h"
@@ -153,7 +154,7 @@ RenderOutcome runRender(const RenderJob& job, const RenderCallback& progress) {
                                   return true;
                               }());
     const bool passthrough = !in.edgeActive() && P.deint.mode == DeintMode::None && colorNeutral && G.cropLeft == 0 && G.cropRight == 0 &&
-                             G.cropTop == 0 && G.cropBottom == 0 && !G.resize && enc == AVPixelFormat(S.pixfmt);
+                             G.cropTop == 0 && G.cropBottom == 0 && !G.resize && !G.scale && enc == AVPixelFormat(S.pixfmt);
 
     // --- container, tags, chapters, captions
     MuxVideo mv;
@@ -163,7 +164,7 @@ RenderOutcome runRender(const RenderJob& job, const RenderCallback& progress) {
     mv.fps = outFps;
     mv.sar = G.sar;
     mv.field = P.deint.mode == DeintMode::None ? order : FieldOrder::Progressive;
-    mv.color = S.color;
+    mv.color = G.color;
     MuxAudio ma;
     ma.present = S.hasAudio;
     ma.rate = S.sampleRate;
@@ -260,6 +261,7 @@ RenderOutcome runRender(const RenderJob& job, const RenderCallback& progress) {
             }
             postProcess(pic, P, S, G, srcOf[size_t(i)]);
             ready[size_t(i)] = fromPicture(pic, enc, interlaced);
+            if (G.scale && ready[size_t(i)]) ready[size_t(i)] = scaleFrame(ready[size_t(i)].get(), G, P.out.scaler, S.color);
             if (!ready[size_t(i)]) fail("cannot convert a frame for the encoder");
         });
         for (FramePtr& f : ready) {
@@ -442,6 +444,19 @@ RenderOutcome runRender(const RenderJob& job, const RenderCallback& progress) {
     out.audioSamples = writer.audioSamples();
     out.outPath = path;
 
+    // Contact sheet from the file as written. A failure here is a note: the render itself is done.
+    if (P.out.contactSheet) {
+        ContactSheetOptions co;
+        co.title = !label.empty() ? label : fs::path(path).stem().string();
+        if (label.empty() && co.title.size() > 7 && co.title.compare(co.title.size() - 7, 7, ".uindub") == 0) co.title.resize(co.title.size() - 7);
+        co.runtime = frameSeconds(out.videoFrames, outFps);
+        co.interval = P.out.contactInterval;
+        const ContactSheetResult cs = writeContactSheet(path, co, [&](double f) { return report("Contact sheet", f, out.videoFrames, out.videoFrames); });
+        if (cs.ok) out.contactSheets = cs.pages;
+        else if (cs.error == "cancelled") out.notes.push_back("Contact sheet stopped; the rendered file is kept.");
+        else out.notes.push_back("No contact sheet: " + cs.error);
+    }
+
     // The sidecar: every setting, the version and the source hash.
     JsonValue sc = JsonValue::object();
     sc.set("uindub_version", UINDUB_VERSION).set("rendered", isoNow());
@@ -466,6 +481,9 @@ RenderOutcome runRender(const RenderJob& job, const RenderCallback& progress) {
         ranges.push(e);
     }
     o.set("kept_ranges", ranges);
+    JsonValue sheets = JsonValue::array();
+    for (const std::string& c : out.contactSheets) sheets.push(c);
+    o.set("contact_sheet", sheets);
     JsonValue notes = JsonValue::array();
     for (const std::string& n : out.notes) notes.push(n);
     o.set("notes", notes);

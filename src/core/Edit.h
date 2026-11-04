@@ -85,6 +85,11 @@ private:
     AudioPlan m_plan;
     int m_channels = 2;
     int64_t m_out = 0;  // output samples produced
+    // The mixed crossfade around one join, made whole the first time any of
+    // it is asked for. Reading it in pieces would send the reader back across
+    // the cut for each piece, and going back means decoding from the start.
+    int m_xfJoin = -1;
+    std::vector<int32_t> m_xf;
 };
 
 }  // namespace ud

@@ -29,6 +29,15 @@ public:
     void setCutStart(int64_t frame);  // -1 clears the pending C mark
     int64_t cutStart() const { return m_cutStart; }
 
+    // Zoom: the frames in view. The view never goes below kMinSpan frames.
+    static constexpr int64_t kMinSpan = 10;
+    std::pair<int64_t, int64_t> view() const { return {m_viewA, m_viewB}; }
+    void zoomBy(double factor);       // < 1 zooms in, around the playhead when it is in view
+    void zoomFit();
+    void zoomTo(int64_t a, int64_t b);  // shows [a, b) with a little room each side
+    void setViewSpan(int64_t span);     // keeps the playhead (or the middle) where it is
+    void setViewStart(int64_t a);
+
 signals:
     void cutRequested(qint64 a, qint64 b);
     void dontCorrectRequested(qint64 a, qint64 b);
@@ -38,6 +47,11 @@ signals:
     void deleteOverrideRequested(qint64 frame);
     void carryForwardRequested(int slot, qint64 frame);
     void endSpanRequested(int slot, qint64 frame);
+    void setInRequested(qint64 frame);
+    void setOutRequested(qint64 frame);  // exclusive end
+    void cutStartRequested(qint64 frame);
+    // The view moved or zoomed: for the scrollbar and the zoom slider.
+    void viewChanged(qint64 a, qint64 b, qint64 total);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -45,16 +59,22 @@ protected:
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
+    void leaveEvent(QEvent* e) override;
     void contextMenuEvent(QContextMenuEvent* e) override;
     void resizeEvent(QResizeEvent*) override;
 
 private:
     double xOf(int64_t frame) const;
     int64_t frameAt(double x) const;
+    int64_t boundaryAt(double x) const;  // nearest frame boundary, 0..frames
     int laneAt(double y) const;  // -1 none, else reference slot
     void fitView();
     void ensureVisible(int64_t frame);
     void buildSummary();
+    void setView(int64_t a, int64_t b);
+    // A handle under x: in, out or a cut edge, for dragging.
+    enum class Handle { None, In, Out, CutStart, CutEnd };
+    Handle handleAt(double x, double y, int* cutIndex) const;
 
     Session* m_s;
     std::vector<QColor> m_colors;
@@ -62,6 +82,8 @@ private:
     bool m_dragging = false, m_selecting = false;
     int64_t m_selA = 0, m_selB = 0, m_selAnchor = 0;
     int64_t m_cutStart = -1;
+    Handle m_drag = Handle::None;
+    int m_dragCut = -1;
     double m_progress = 0;
     bool m_rendering = false;
     // per column summaries of the tracks

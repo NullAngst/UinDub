@@ -3,6 +3,7 @@
 
 #include "shared/Json.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -208,6 +209,8 @@ JsonValue Project::settingsJson() const {
     o.set("audio", audioCodecName(out.audio)).set("opus_kbps", out.opusKbps).set("aac_kbps", out.aacKbps);
     o.set("container", out.mp4 ? "mp4" : "mkv").set("folder", out.folder).set("name", out.name);
     o.set("chapters", out.chapters).set("captions", out.captions);
+    o.set("scale_height", out.scaleHeight).set("scaler", out.scaler);
+    o.set("contact_sheet", out.contactSheet).set("contact_interval", out.contactInterval);
     j.set("output", o);
 
     if (hasTruth) {
@@ -300,6 +303,10 @@ bool Project::fromJson(const JsonValue& j, std::string& err) {
         out.name = o["name"].str();
         out.chapters = o["chapters"].boolean(true);
         out.captions = o["captions"].boolean(true);
+        out.scaleHeight = int(o["scale_height"].integer(0));
+        out.scaler = o["scaler"].str("lanczos");
+        out.contactSheet = o["contact_sheet"].boolean(true);
+        out.contactInterval = std::max(1, int(o["contact_interval"].integer(30)));
     }
     hasTruth = j.has("warble_truth");
     if (hasTruth) {

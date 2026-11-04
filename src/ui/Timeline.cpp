@@ -23,8 +23,8 @@ constexpr int kSnapPx = 8;
 Timeline::Timeline(Session* s, QWidget* parent) : QWidget(parent), m_s(s) {
     setMouseTracking(true);
     setMinimumHeight(yLanes + kLane + kBand);
-    setToolTip(tr("Click or drag to move the playhead. Shift-drag selects a span; right-click for what to do with it. Ctrl+wheel zooms, "
-                  "wheel scrolls."));
+    setToolTip(tr("Click or drag to move the playhead. Drag the in and out brackets or a cut's edges to move them. Shift-drag selects a "
+                  "span; right-click for what to do with it. Ctrl+wheel zooms, wheel scrolls."));
     connect(s, &Session::opened, this, [this] {
         fitView();
         update();
@@ -67,19 +67,47 @@ void Timeline::setCutStart(int64_t f) {
     update();
 }
 
-void Timeline::fitView() {
-    m_viewA = 0;
-    m_viewB = std::max<int64_t>(1, m_s->frames());
+void Timeline::setView(int64_t a, int64_t b) {
+    const int64_t total = std::max<int64_t>(1, m_s->frames());
+    int64_t span = std::clamp<int64_t>(b - a, std::min(kMinSpan, total), total);
+    a = std::clamp<int64_t>(a, 0, total - span);
+    if (a == m_viewA && a + span == m_viewB) return;
+    m_viewA = a;
+    m_viewB = a + span;
     m_sumA = -1;
+    update();
+    emit viewChanged(m_viewA, m_viewB, total);
 }
+
+void Timeline::fitView() { setView(0, std::max<int64_t>(1, m_s->frames())); }
+
+void Timeline::zoomFit() {
+    if (m_s->isOpen()) fitView();
+}
+
+void Timeline::setViewSpan(int64_t span) {
+    if (!m_s->isOpen()) return;
+    // Zoom around the playhead when it is on screen, else around the middle.
+    const int64_t f = m_s->frame();
+    const int64_t old = std::max<int64_t>(1, m_viewB - m_viewA);
+    const double t = (f >= m_viewA && f < m_viewB) ? double(f - m_viewA) / double(old) : 0.5;
+    const int64_t at = (f >= m_viewA && f < m_viewB) ? f : m_viewA + old / 2;
+    setView(at - int64_t(t * double(span)), at - int64_t(t * double(span)) + span);
+}
+
+void Timeline::zoomBy(double k) { setViewSpan(int64_t(std::llround(double(m_viewB - m_viewA) * k))); }
+
+void Timeline::zoomTo(int64_t a, int64_t b) {
+    if (!m_s->isOpen() || b <= a) return;
+    const int64_t pad = std::max<int64_t>(2, (b - a) / 20);
+    setView(a - pad, b + pad);
+}
+
+void Timeline::setViewStart(int64_t a) { setView(a, a + (m_viewB - m_viewA)); }
 
 void Timeline::ensureVisible(int64_t f) {
     const int64_t span = m_viewB - m_viewA;
-    if (f < m_viewA || f >= m_viewB) {
-        m_viewA = std::clamp<int64_t>(f - span / 4, 0, std::max<int64_t>(0, m_s->frames() - span));
-        m_viewB = m_viewA + span;
-        m_sumA = -1;
-    }
+    if (f < m_viewA || f >= m_viewB) setView(f - span / 4, f - span / 4 + span);
 }
 
 void Timeline::resizeEvent(QResizeEvent*) { m_sumA = -1; }
@@ -93,6 +121,37 @@ int64_t Timeline::frameAt(double x) const {
     const double w = std::max(1, width());
     const int64_t f = m_viewA + int64_t(std::floor(x / w * double(m_viewB - m_viewA)));
     return std::clamp<int64_t>(f, 0, std::max<int64_t>(0, m_s->frames() - 1));
+}
+
+int64_t Timeline::boundaryAt(double x) const {
+    const double w = std::max(1, width());
+    const int64_t f = m_viewA + int64_t(std::llround(x / w * double(m_viewB - m_viewA)));
+    return std::clamp<int64_t>(f, 0, std::max<int64_t>(0, m_s->frames()));
+}
+
+Timeline::Handle Timeline::handleAt(double x, double y, int* cutIndex) const {
+    if (!m_s->isOpen() || y < yRuler) return Handle::None;
+    const Project& pr = m_s->project();
+    const int64_t total = m_s->frames();
+    const int64_t in = std::clamp<int64_t>(pr.edit.in, 0, total), out = pr.edit.out < 0 ? total : std::clamp<int64_t>(pr.edit.out, 0, total);
+    constexpr double reach = 5;
+    Handle best = Handle::None;
+    double bestD = reach + 1;
+    auto consider = [&](int64_t f, Handle h, int idx) {
+        const double d = std::fabs(xOf(f) - x);
+        if (d < bestD) {
+            bestD = d;
+            best = h;
+            if (cutIndex) *cutIndex = idx;
+        }
+    };
+    consider(in, Handle::In, -1);
+    consider(out, Handle::Out, -1);
+    for (size_t i = 0; i < pr.edit.cuts.size(); ++i) {
+        consider(pr.edit.cuts[i].start, Handle::CutStart, int(i));
+        consider(pr.edit.cuts[i].end, Handle::CutEnd, int(i));
+    }
+    return best;
 }
 
 int Timeline::laneAt(double y) const {
@@ -202,17 +261,24 @@ void Timeline::paintEvent(QPaintEvent*) {
         p.drawLine(QPointF(x, yRuler + kRuler - 6), QPointF(x, yRuler + kRuler));
         p.drawText(QRectF(x + 3, yRuler, 90, kRuler - 6), Qt::AlignLeft | Qt::AlignVCenter, QString::fromStdString(clockString(t)).left(8));
     }
-    // In and out brackets.
-    p.setPen(QPen(pal.color(QPalette::Highlight), 2));
+    // Zoomed in far enough, a tick on every frame.
+    const double pxPerFrame = double(W) / double(std::max<int64_t>(1, m_viewB - m_viewA));
+    if (pxPerFrame >= 6) {
+        p.setPen(QColor(muted.red(), muted.green(), muted.blue(), 110));
+        for (int64_t f = m_viewA; f <= m_viewB; ++f) p.drawLine(QPointF(xOf(f), yRuler + kRuler - 3), QPointF(xOf(f), yRuler + kRuler));
+    }
+    // In and out brackets, with grips to drag them by.
+    const QColor hl = pal.color(QPalette::Highlight);
+    p.setPen(QPen(hl, 2));
     if (in >= m_viewA && in <= m_viewB) {
         const double x = xOf(in);
         p.drawLine(QPointF(x, yRuler), QPointF(x, bottom));
-        p.drawLine(QPointF(x, yRuler), QPointF(x + 6, yRuler));
+        p.fillRect(QRectF(x, yRuler, 8, 6), hl);
     }
     if (out >= m_viewA && out <= m_viewB) {
         const double x = xOf(out);
         p.drawLine(QPointF(x, yRuler), QPointF(x, bottom));
-        p.drawLine(QPointF(x, yRuler), QPointF(x - 6, yRuler));
+        p.fillRect(QRectF(x - 8, yRuler, 8, 6), hl);
     }
 
     // Chapters along the top.
@@ -299,6 +365,10 @@ void Timeline::paintEvent(QPaintEvent*) {
         const QRectF rr(xOf(c.start), yRuler, std::max(2.0, xOf(c.end) - xOf(c.start)), bottom - yRuler);
         p.fillRect(rr, QColor(0, 0, 0, 110));
         p.fillRect(rr, QBrush(QColor(0xF8, 0x51, 0x49, 200), Qt::FDiagPattern));
+        // Edges drawn solid so they read as something to grab.
+        p.setPen(QPen(QColor(0xF8, 0x51, 0x49), 2));
+        p.drawLine(QPointF(rr.left(), yRuler), QPointF(rr.left(), bottom));
+        p.drawLine(QPointF(rr.right(), yRuler), QPointF(rr.right(), bottom));
     }
     if (m_cutStart >= 0) {
         const double x = xOf(m_cutStart);
@@ -323,6 +393,15 @@ void Timeline::paintEvent(QPaintEvent*) {
 void Timeline::mousePressEvent(QMouseEvent* e) {
     if (!m_s->isOpen() || e->button() != Qt::LeftButton) return;
     const int64_t f = frameAt(e->position().x());
+    if (!(e->modifiers() & Qt::ShiftModifier)) {
+        int idx = -1;
+        const Handle h = handleAt(e->position().x(), e->position().y(), &idx);
+        if (h != Handle::None) {
+            m_drag = h;
+            m_dragCut = idx;
+            return;
+        }
+    }
     if (e->modifiers() & Qt::ShiftModifier) {
         m_selecting = true;
         m_selAnchor = (e->modifiers() & Qt::AltModifier) ? f : snap(f);
@@ -337,6 +416,46 @@ void Timeline::mousePressEvent(QMouseEvent* e) {
 void Timeline::mouseMoveEvent(QMouseEvent* e) {
     if (!m_s->isOpen()) return;
     const int64_t f = frameAt(e->position().x());
+    if (m_drag != Handle::None) {
+        // The project changes live so the timeline follows; the change is
+        // announced on release. The preview shows the frame at the handle.
+        int64_t b = boundaryAt(e->position().x());
+        if (!(e->modifiers() & Qt::AltModifier)) b = snap(b);
+        Project& pr = m_s->project();
+        const int64_t total = m_s->frames();
+        const int64_t out = pr.edit.out < 0 ? total : pr.edit.out;
+        int64_t show = b;
+        switch (m_drag) {
+        case Handle::In:
+            pr.edit.in = std::clamp<int64_t>(b, 0, out - 1);
+            show = pr.edit.in;
+            break;
+        case Handle::Out:
+            pr.edit.out = std::clamp<int64_t>(b, pr.edit.in + 1, total);
+            if (pr.edit.out == total) pr.edit.out = -1;
+            show = (pr.edit.out < 0 ? total : pr.edit.out) - 1;
+            break;
+        case Handle::CutStart:
+            if (m_dragCut >= 0 && m_dragCut < int(pr.edit.cuts.size())) {
+                CutSpan& c = pr.edit.cuts[size_t(m_dragCut)];
+                c.start = std::clamp<int64_t>(b, 0, c.end - 1);
+                show = c.start;
+            }
+            break;
+        case Handle::CutEnd:
+            if (m_dragCut >= 0 && m_dragCut < int(pr.edit.cuts.size())) {
+                CutSpan& c = pr.edit.cuts[size_t(m_dragCut)];
+                c.end = std::clamp<int64_t>(b, c.start + 1, total);
+                show = c.end;
+            }
+            break;
+        default: break;
+        }
+        m_s->seek(std::clamp<int64_t>(show, 0, std::max<int64_t>(0, total - 1)), 0);
+        update();
+        return;
+    }
+    if (!m_dragging && !m_selecting) setCursor(handleAt(e->position().x(), e->position().y(), nullptr) != Handle::None ? Qt::SizeHorCursor : Qt::ArrowCursor);
     if (m_selecting) {
         const int64_t g = (e->modifiers() & Qt::AltModifier) ? f : snap(f);
         m_selA = std::min(m_selAnchor, g);
@@ -356,28 +475,34 @@ void Timeline::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void Timeline::mouseReleaseEvent(QMouseEvent*) {
+    if (m_drag != Handle::None) {
+        m_drag = Handle::None;
+        m_dragCut = -1;
+        m_s->changed(ChEdit);
+    }
     m_dragging = false;
     m_selecting = false;
 }
+
+void Timeline::leaveEvent(QEvent*) { unsetCursor(); }
 
 void Timeline::wheelEvent(QWheelEvent* e) {
     if (!m_s->isOpen()) return;
     const int64_t total = std::max<int64_t>(1, m_s->frames());
     const int64_t span = m_viewB - m_viewA;
+    if (e->angleDelta().y() == 0 && e->angleDelta().x() == 0) return;
     if (e->modifiers() & Qt::ControlModifier) {
+        // Zoom around the frame under the pointer.
         const int64_t at = frameAt(e->position().x());
         const double k = e->angleDelta().y() > 0 ? 0.7 : 1.4;
-        int64_t ns = std::clamp<int64_t>(int64_t(std::llround(double(span) * k)), 30, total);
+        const int64_t ns = std::clamp<int64_t>(int64_t(std::llround(double(span) * k)), std::min(kMinSpan, total), total);
         const double t = double(at - m_viewA) / double(std::max<int64_t>(1, span));
-        m_viewA = std::clamp<int64_t>(at - int64_t(t * ns), 0, total - ns);
-        m_viewB = m_viewA + ns;
+        setView(at - int64_t(t * double(ns)), at - int64_t(t * double(ns)) + ns);
     } else {
-        const int64_t d = std::max<int64_t>(1, span / 10) * (e->angleDelta().y() > 0 ? -1 : 1);
-        m_viewA = std::clamp<int64_t>(m_viewA + d, 0, total - span);
-        m_viewB = m_viewA + span;
+        const int delta = e->angleDelta().y() != 0 ? e->angleDelta().y() : e->angleDelta().x();
+        const int64_t d = std::max<int64_t>(1, span / 10) * (delta > 0 ? -1 : 1);
+        setViewStart(m_viewA + d);
     }
-    m_sumA = -1;
-    update();
 }
 
 void Timeline::contextMenuEvent(QContextMenuEvent* e) {
@@ -405,7 +530,13 @@ void Timeline::contextMenuEvent(QContextMenuEvent* e) {
         m.addAction(tr("Carry this reference forward to here"), this, [this, lane, f] { emit carryForwardRequested(lane, f); });
         if (pr.refs[size_t(lane)].spanAt(f)) m.addAction(tr("End this reference's span here"), this, [this, lane, f] { emit endSpanRequested(lane, f); });
     }
-    if (m.isEmpty()) m.addAction(tr("Shift-drag to select a span first"))->setEnabled(false);
+    m.addSeparator();
+    m.addAction(tr("Set in point here"), this, [this, f] { emit setInRequested(f); });
+    m.addAction(tr("Set out point here"), this, [this, f] { emit setOutRequested(f + 1); });
+    m.addAction(cutStart() < 0 ? tr("Start a cut here") : tr("End the cut here"), this, [this, f] { emit cutStartRequested(f); });
+    m.addSeparator();
+    if (m_selB > m_selA) m.addAction(tr("Zoom to the selection"), this, [this] { zoomTo(m_selA, m_selB); });
+    m.addAction(tr("Zoom to fit"), this, [this] { zoomFit(); });
     m.exec(e->globalPos());
 }
 

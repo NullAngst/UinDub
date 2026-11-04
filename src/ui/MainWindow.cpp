@@ -10,6 +10,7 @@
 #include "PreviewWidget.h"
 #include "Tabs.h"
 #include "Timeline.h"
+#include "Transport.h"
 #include "core/Analyze.h"
 #include "core/Qtgmc.h"
 #include "core/Warble.h"
@@ -57,20 +58,25 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     top->setStretchFactor(1, 0);
     m_strip->setVisible(false);
     m_timeline = new Timeline(m_s, center);
+    m_transport = new TransportBar(m_s, m_timeline, center);
     cl->addWidget(top, 1);
+    cl->addWidget(m_transport);
     cl->addWidget(m_timeline);
+    cl->addWidget(m_transport->scrollBar());
 
     // Side panel, tabs in pipeline order.
     auto* tabs = new QTabWidget(this);
     tabs->setMinimumWidth(360);
-    tabs->setUsesScrollButtons(false);  // all six tabs stay visible; the panel widens to fit
+    tabs->setUsesScrollButtons(false);  // every tab stays visible; the panel widens to fit
     m_sourceTab = new SourceTab(m_s, tabs);
+    m_analyzeTab = new AnalyzeTab(m_s, tabs);
     m_edgeTab = new EdgeLockTab(m_s, tabs);
     m_deintTab = new DeinterlaceTab(m_s, tabs);
     m_colorTab = new ColorTab(m_s, tabs);
     m_cropTab = new CropTab(m_s, tabs);
     m_outputTab = new OutputTab(m_s, tabs);
     tabs->addTab(m_sourceTab, tr("Source"));
+    tabs->addTab(m_analyzeTab, tr("Analyze"));
     tabs->addTab(m_edgeTab, tr("Edge Lock"));
     tabs->addTab(m_deintTab, tr("Deinterlace"));
     tabs->addTab(m_colorTab, tr("Color"));
@@ -94,6 +100,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_msg = new QLabel(this);
     statusBar()->addWidget(m_pos);
     statusBar()->addWidget(m_msg, 1);
+    statusBar()->addPermanentWidget(m_transport->trimLabel());
 
     const auto colors = referenceColors();
     m_preview->setRefColors(colors);
@@ -160,6 +167,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         showMessage(ok ? tr("Rendered %1").arg(path) : tr("Render did not finish; see the queue for why."));
     });
 
+    connect(m_analyzeTab, &AnalyzeTab::edgeLockRequested, this, [this] {
+        QString why;
+        if (!analyze(0, -1, nullptr, &why)) m_analyzeTab->edgeLockDone(false, why);
+    });
+    connect(m_analyzeTab, &AnalyzeTab::stopRequested, this, [this] {
+        if (m_analyzeCancel) *m_analyzeCancel = true;
+    });
+    connect(m_transport, &TransportBar::action, this, [this](const QString& id) {
+        if (QAction* a = m_keyed.value(id)) a->trigger();
+    });
+
     // Timeline actions.
     connect(m_timeline, &Timeline::cutRequested, this, [this](qint64 a, qint64 b) {
         m_s->project().edit.cuts.push_back({a, b});
@@ -214,6 +232,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         std::sort(r.spans.begin(), r.spans.end(), [](const RefSpan& a, const RefSpan& b) { return a.start < b.start; });
         m_s->changed(ChRefs);
     });
+    connect(m_timeline, &Timeline::setInRequested, this, [this](qint64 f) { setIn(f); });
+    connect(m_timeline, &Timeline::setOutRequested, this, [this](qint64 f) { setOut(f); });
+    connect(m_timeline, &Timeline::cutStartRequested, this, [this](qint64 f) { markCutAt(f); });
     connect(m_timeline, &Timeline::endSpanRequested, this, [this](int slot, qint64 f) {
         Project& p = m_s->project();
         if (slot < 0 || slot >= int(p.refs.size())) return;
@@ -299,7 +320,7 @@ void MainWindow::buildMenus() {
             showMessage(tr("Warble copy open. Its left border is set: run Analyze (F5) and the Edge Lock tab shows the score."));
         }
     });
-    tools->addAction(tr("&Analyze"), this, [this] { analyze(); });
+    tools->addAction(tr("&Analyze Edge Lock"), this, [this] { analyze(); });
     tools->addAction(tr("&Render"), this, [this] { render(true); });
     QMenu* settings = menuBar()->addMenu(tr("&Settings"));
     settings->addAction(tr("&Preferences..."), this, [this] {
@@ -352,18 +373,86 @@ void MainWindow::bindKeys() {
     bind("shuttle_back", [this] { setPlaying(m_speed >= 0 ? -1 : std::max(-8, m_speed * 2)); });
     bind("shuttle_stop", [this] { setPlaying(0); });
     bind("shuttle_fwd", [this] { setPlaying(m_speed <= 0 ? 1 : std::min(8, m_speed * 2)); });
-    bind("mark_in", [this] {
-        m_s->project().edit.in = m_timeline->snap(m_s->frame());
-        m_s->changed(ChEdit);
-    });
-    bind("mark_out", [this] {
-        m_s->project().edit.out = m_timeline->snap(m_s->frame()) + 1;
-        m_s->changed(ChEdit);
-    });
+    bind("mark_in", [this] { setIn(m_timeline->snap(m_s->frame())); });
+    bind("mark_out", [this] { setOut(m_timeline->snap(m_s->frame()) + 1); });
     bind("mark_cut", [this] { markCut(); });
+    bind("cut_selection", [this] {
+        const auto [a, b] = m_timeline->selection();
+        if (b <= a) {
+            showMessage(tr("Shift-drag on the timeline to select a span first."));
+            return;
+        }
+        m_s->project().edit.cuts.push_back({a, b});
+        m_timeline->clearSelection();
+        m_s->changed(ChEdit);
+        showMessage(tr("Cut %1 frames.").arg(b - a));
+    });
+    bind("delete_cut", [this] {
+        if (!m_s->isOpen()) return;
+        auto& cuts = m_s->project().edit.cuts;
+        const int64_t f = m_s->frame();
+        const size_t before = cuts.size();
+        cuts.erase(std::remove_if(cuts.begin(), cuts.end(), [f](const CutSpan& c) { return f >= c.start && f < c.end; }), cuts.end());
+        if (cuts.size() == before) {
+            showMessage(tr("No cut under the playhead."));
+            return;
+        }
+        m_s->changed(ChEdit);
+        showMessage(tr("Cut removed."));
+    });
+    bind("clear_trim", [this] {
+        if (!m_s->isOpen()) return;
+        m_s->project().edit.in = 0;
+        m_s->project().edit.out = -1;
+        m_s->changed(ChEdit);
+    });
+    auto go = [this](int64_t f) {
+        if (!m_s->isOpen()) return;
+        setPlaying(0);
+        m_s->seek(std::clamp<int64_t>(f, 0, std::max<int64_t>(0, m_s->frames() - 1)), 0);
+    };
+    bind("go_start", [go] { go(0); });
+    bind("go_end", [this, go] { go(m_s->frames() - 1); });
+    bind("go_in", [this, go] { go(m_s->project().edit.in); });
+    bind("go_out", [this, go] { go((m_s->project().edit.out < 0 ? m_s->frames() : m_s->project().edit.out) - 1); });
+    bind("zoom_in", [this] { m_timeline->zoomBy(0.5); });
+    bind("zoom_out", [this] { m_timeline->zoomBy(2.0); });
+    bind("zoom_fit", [this] { m_timeline->zoomFit(); });
+    bind("zoom_trim", [this] {
+        if (!m_s->isOpen()) return;
+        const Project& p = m_s->project();
+        m_timeline->zoomTo(p.edit.in, p.edit.out < 0 ? m_s->frames() : p.edit.out);
+    });
     bind("analyze", [this] { analyze(); });
     bind("render", [this] { render(true); });
     bind("stop", [this] { stopAll(); });
+    QHash<QString, QString> hints;
+    for (auto it = m_keyed.begin(); it != m_keyed.end(); ++it) hints[it.key()] = it.value()->shortcut().toString(QKeySequence::NativeText);
+    m_transport->setKeyHints(hints);
+}
+
+void MainWindow::setIn(int64_t f) {
+    if (!m_s->isOpen()) return;
+    EditSettings& e = m_s->project().edit;
+    e.in = std::clamp<int64_t>(f, 0, std::max<int64_t>(0, m_s->frames() - 1));
+    // An in point past the out point would keep nothing; the out point goes back to the end.
+    if (e.out >= 0 && e.out <= e.in) {
+        e.out = -1;
+        showMessage(tr("In point is past the old out point, so the out point is back at the end."));
+    }
+    m_s->changed(ChEdit);
+}
+
+void MainWindow::setOut(int64_t f) {
+    if (!m_s->isOpen()) return;
+    EditSettings& e = m_s->project().edit;
+    e.out = std::clamp<int64_t>(f, 1, m_s->frames());
+    if (e.out >= m_s->frames()) e.out = -1;
+    if (e.out >= 0 && e.out <= e.in) {
+        e.in = 0;
+        showMessage(tr("Out point is before the old in point, so the in point is back at the start."));
+    }
+    m_s->changed(ChEdit);
 }
 
 bool MainWindow::openPath(const QString& path) {
@@ -539,17 +628,22 @@ void MainWindow::drawnEdge(const std::vector<PointF>& pts) {
     m_s->changed(ChRefs | ChEdge);
 }
 
-void MainWindow::analyze(int64_t start, int64_t end, const EdgeLockSettings* override) {
-    if (!m_s->isOpen() || m_analyzing) return;
+bool MainWindow::analyze(int64_t start, int64_t end, const EdgeLockSettings* override, QString* why) {
+    if (!m_s->isOpen() || m_analyzing) {
+        if (why) *why = m_analyzing ? tr("Edge Lock is already analyzing.") : tr("Nothing open.");
+        return false;
+    }
     Project& p = m_s->project();
     if (p.refs.empty()) {
         showMessage(tr("Set a reference first: Use left border, or Draw edge."));
-        return;
+        if (why) *why = tr("Set a reference in the Edge Lock tab first.");
+        return false;
     }
     const bool partial = start > 0 || (end >= 0 && end < m_s->frames());
     if (partial && !p.analysisCurrent()) {
         QMessageBox::information(this, tr("Re-analyze"), tr("Analyze the whole clip with these references first; then a span can be re-analyzed on its own."));
-        return;
+        if (why) *why = tr("Analyze the whole clip first.");
+        return false;
     }
     m_s->saveNow();
     AnalyzeJob job;
@@ -575,7 +669,10 @@ void MainWindow::analyze(int64_t start, int64_t end, const EdgeLockSettings* ove
                 QMetaObject::invokeMethod(
                     self,
                     [self, f, frame] {
-                        if (self) self->m_edgeTab->setAnalyzing(true, f, tr("Analyzing frame %1 (%2%)").arg(frame).arg(f * 100, 0, 'f', 1));
+                        if (!self) return;
+                        const QString st = tr("Analyzing frame %1 (%2%)").arg(frame).arg(f * 100, 0, 'f', 1);
+                        self->m_edgeTab->setAnalyzing(true, f, st);
+                        self->m_analyzeTab->edgeLockProgress(f, st);
                     },
                     Qt::QueuedConnection);
                 return !*cancel;
@@ -606,11 +703,15 @@ void MainWindow::analyze(int64_t start, int64_t end, const EdgeLockSettings* ove
                     if (sc.ok) msg += tr(" Warble test: %1 px RMS residual on measured lines.").arg(sc.rmsMeasured, 0, 'f', 3);
                 }
                 showMessage(msg);
+                m_analyzeTab->edgeLockDone(true, msg);
             } else {
-                m_edgeTab->setAnalyzing(false, 0, out->cancelled ? tr("Analyze stopped. The previous offsets are untouched.") : QString::fromStdString(out->error));
+                const QString why = out->cancelled ? tr("Analyze stopped. The previous offsets are untouched.") : QString::fromStdString(out->error);
+                m_edgeTab->setAnalyzing(false, 0, why);
                 m_s->changed(ChEdge);
+                m_analyzeTab->edgeLockDone(false, why);
             }
         });
+    return true;
 }
 
 void MainWindow::stopAll() {
@@ -666,7 +767,11 @@ void MainWindow::render(bool startNow) {
 
 void MainWindow::markCut() {
     if (!m_s->isOpen()) return;
-    const int64_t f = m_timeline->snap(m_s->frame());
+    markCutAt(m_timeline->snap(m_s->frame()));
+}
+
+void MainWindow::markCutAt(int64_t f) {
+    if (!m_s->isOpen()) return;
     if (m_timeline->cutStart() < 0) {
         m_timeline->setCutStart(f);
         showMessage(tr("Cut starts here. Move to its end and press C again (Esc cancels)."));
@@ -682,6 +787,7 @@ void MainWindow::markCut() {
 
 void MainWindow::setPlaying(int speed) {
     m_speed = speed;
+    m_transport->setPlaying(speed != 0);
     if (!m_s->isOpen() || speed == 0) {
         m_play.stop();
         updateStatus();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "Pipeline.h"
 
+#include "Output.h"
 #include "Simd.h"
 
 #include <algorithm>
@@ -9,7 +10,9 @@
 
 extern "C" {
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 }
+
 
 namespace ud {
 
@@ -105,6 +108,7 @@ OutputGeometry outputGeometry(const Project& p, const SourceInfo& s, AVPixelForm
     }
     g.croppedWidth = w;
     g.height = h;
+    g.color = s.color;
     if (p.crop.squarePixels && s.sar.valid() && s.sar.num != s.sar.den) {
         int nw = int(std::lround(double(w) * s.sar.num / s.sar.den));
         if (sx && (nw & 1)) ++nw;
@@ -115,7 +119,68 @@ OutputGeometry outputGeometry(const Project& p, const SourceInfo& s, AVPixelForm
         g.width = w;
         g.sar = s.sar;
     }
+    g.preWidth = g.width;
+    g.preHeight = g.height;
+    const int target = p.out.scaleHeight;
+    if (target > 0 && interlacedOut) {
+        g.notes.push_back("Resize is skipped: the output stays interlaced, and scaling interlaced lines mixes the two fields.");
+    } else if (target > 0) {
+        // Display aspect of what is left after the crop, then square pixels at the new height.
+        const double sar = s.sar.valid() ? s.sar.toDouble() : 1.0;
+        const double dar = double(w) * sar / double(h);
+        int nw = int(std::lround(double(target) * dar / 2.0)) * 2;
+        nw = std::max(16, nw);
+        g.preWidth = w;  // swscale fixes the pixel aspect too, so the width resample is not needed
+        g.preHeight = h;
+        g.resize = false;
+        g.width = nw;
+        g.height = target & ~1;
+        g.sar = {1, 1};
+        g.scale = true;
+        // HD players assume BT.709, so the matrix is converted and tagged.
+        if (g.height >= 720) g.color = ColorStd::Bt709;
+        g.notes.push_back("Scaled to " + std::to_string(g.width) + "x" + std::to_string(g.height) + " with square pixels" +
+                          (g.color == ColorStd::Bt709 && s.color != ColorStd::Bt709 ? ", matrix converted to BT.709." : "."));
+    }
     return g;
+}
+
+namespace {
+
+int swsMatrix(ColorStd c) {
+    switch (c) {
+    case ColorStd::Bt709: return SWS_CS_ITU709;
+    case ColorStd::Bt470bg: return SWS_CS_ITU601;
+    default: return SWS_CS_SMPTE170M;
+    }
+}
+
+// One cached context per worker thread.
+struct SwsCache {
+    SwsContext* ctx = nullptr;
+    ~SwsCache() { sws_freeContext(ctx); }
+};
+
+}  // namespace
+
+FramePtr scaleFrame(const AVFrame* in, const OutputGeometry& g, const std::string& scaler, ColorStd from) {
+    if (!in) return nullptr;
+    thread_local SwsCache cache;
+    const AVPixelFormat fmt = AVPixelFormat(in->format);
+    cache.ctx = sws_getCachedContext(cache.ctx, in->width, in->height, fmt, g.width, g.height, fmt, scalerFlags(scaler), nullptr, nullptr, nullptr);
+    if (!cache.ctx) return nullptr;
+    const int* srcM = sws_getCoefficients(swsMatrix(from));
+    const int* dstM = sws_getCoefficients(swsMatrix(g.color));
+    // Limited range both sides; only the matrix changes.
+    sws_setColorspaceDetails(cache.ctx, srcM, 0, dstM, 0, 0, 1 << 16, 1 << 16);
+    FramePtr out = makeFrame();
+    out->format = fmt;
+    out->width = g.width;
+    out->height = g.height;
+    if (av_frame_get_buffer(out.get(), 0) < 0) return nullptr;
+    sws_scale(cache.ctx, in->data, in->linesize, 0, in->height, out->data, out->linesize);
+    av_frame_copy_props(out.get(), in);
+    return out;
 }
 
 bool InputStage::open(const Project& p, const SourceInfo& s, std::string& err) {

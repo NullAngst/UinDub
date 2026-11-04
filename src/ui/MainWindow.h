@@ -28,6 +28,8 @@ class CropTab;
 class OutputTab;
 class ScopesDock;
 class QueueDock;
+class TransportBar;
+class AnalyzeTab;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -51,10 +53,14 @@ private:
     void useBorder();
     void startDraw();
     void drawnEdge(const std::vector<PointF>& pts);
-    void analyze(int64_t start = 0, int64_t end = -1, const EdgeLockSettings* settings = nullptr);
+    // false when it did not start, with the reason in `why`.
+    bool analyze(int64_t start = 0, int64_t end = -1, const EdgeLockSettings* settings = nullptr, QString* why = nullptr);
     void stopAll();
     void render(bool startNow);
     void markCut();
+    void markCutAt(int64_t frame);
+    void setIn(int64_t frame);
+    void setOut(int64_t frameEnd);
     void setPlaying(int speed);
     void tick();
     void updateStatus();
@@ -66,6 +72,8 @@ private:
     PreviewWidget* m_preview;
     OffsetStrip* m_strip;
     Timeline* m_timeline;
+    TransportBar* m_transport;
+    AnalyzeTab* m_analyzeTab;
     SourceTab* m_sourceTab;
     EdgeLockTab* m_edgeTab;
     DeinterlaceTab* m_deintTab;

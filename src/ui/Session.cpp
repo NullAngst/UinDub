@@ -115,6 +115,13 @@ void Session::rerunFieldCheck() {
     changed(ChSource);
 }
 
+void Session::setFieldCheck(const FieldOrderCheck& c) {
+    if (!m_open) return;
+    m_check = c;
+    if (!m_project.fieldOverride) m_project.fieldOrder = m_check.chosen;
+    changed(ChSource);
+}
+
 void Session::reloadAnalysis() {
     m_offsets.reset();
     m_tracks = TrackStore{};

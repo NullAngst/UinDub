@@ -3,6 +3,7 @@
 
 #include "App.h"
 #include "core/Analyze.h"
+#include "core/Detect.h"
 #include "core/Pipeline.h"
 #include "core/Qtgmc.h"
 #include "core/Warble.h"
@@ -14,6 +15,8 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QLocale>
+#include <QPointer>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
@@ -51,6 +54,29 @@ QString rate(const Rational& r) {
     if (r.den == 1) return QString::number(r.num);
     return QString::number(r.toDouble(), 'f', 3);
 }
+
+// Auto levels: luma percentiles from up to 200 frames of [a, b), cut spans skipped.
+bool measureLevels(const SourceInfo& s, const Project& p, int64_t a, int64_t b, double& black, double& white, const std::atomic<bool>* cancel) {
+    SourceReader r;
+    std::string err;
+    if (!r.open(s, err) || b <= a) return false;
+    LevelHistogram hist;
+    const int64_t step = std::max<int64_t>(1, (b - a) / 200);
+    for (int64_t n = a; n < b; n += step) {
+        if (cancel && *cancel) return false;
+        bool cut = false;
+        for (const CutSpan& c : p.edit.cuts) cut |= n >= c.start && n < c.end;
+        if (cut) continue;
+        FramePtr f = r.read(n);
+        Picture pic;
+        if (f && toPicture(f.get(), pic, true)) hist.add(pic, 16, 8);
+    }
+    black = 16;
+    white = 235;
+    return hist.suggest(black, white);
+}
+
+QString thousands(int64_t v) { return QLocale().toString(qlonglong(v)); }
 
 }  // namespace
 
@@ -202,6 +228,414 @@ void SourceTab::verify() {
             m_verify->setEnabled(true);
             m_verifyResult->setText(result->trimmed());
         });
+}
+
+// ---------------------------------------------------------------------------
+// Analyze
+
+AnalyzeTab::AnalyzeTab(Session* s, QWidget* parent) : QWidget(parent), m_s(s) {
+    QVBoxLayout* l = scrolled(this);
+    l->addWidget(noteLabel(tr("Tick what to look at and run them in one go. Nothing here changes the project until you press Apply (or tick "
+                              "Apply suggestions), except the comb test, which feeds the automatic field order like it always has."),
+                           this));
+    auto* rf = new QFormLayout;
+    m_range = new QComboBox(this);
+    m_range->addItem(tr("Between the in and out points"));
+    m_range->addItem(tr("The whole clip"));
+    rf->addRow(tr("Look at"), m_range);
+    l->addLayout(rf);
+
+    struct Def {
+        Item item;
+        QString name, tip;
+        bool on;
+    };
+    const Def defs[] = {
+        {FieldComb, tr("Field order: comb test"),
+         tr("UinDub's own test: weaves the first moving frames both ways and sees which way combs less. The result feeds the automatic field "
+            "order in the Source tab."),
+         true},
+        {Idet, tr("Interlacing and film cadence (FFmpeg idet)"),
+         tr("Counts top-first, bottom-first and progressive frames in stretches across the range, and the repeated fields that 3:2 pulldown "
+            "leaves. Suggests a field order, and IVTC when the tape is telecined film."),
+         true},
+        {Crop, tr("Black borders (FFmpeg cropdetect)"),
+         tr("Finds edges that stay black in every sampled frame. The suggested crop is never smaller than the safe crop (head switching and "
+            "Edge Lock shifts)."),
+         true},
+        {Levels, tr("Black and white levels"),
+         tr("The 0.1st and 99.9th luma percentiles as black and white points, the same measurement as Color > Auto levels."), true},
+        {Loudness, tr("Audio loudness and clipping (FFmpeg ebur128)"),
+         tr("Integrated loudness, loudness range, sample peak and how many samples sit at full scale, over the audio the render would write."),
+         true},
+        {Verify, tr("Verify the master (PingDub checksums)"),
+         tr("Every byte and every decoded frame against PingDub's .sha256 and .framemd5 sidecars. Reads the whole file, so it is off by "
+            "default."),
+         false},
+        {EdgeLock, tr("Edge Lock offsets (F5)"),
+         tr("Measures every field against the references set in the Edge Lock tab. Takes about as long as decoding the clip, so it runs last."),
+         false},
+    };
+    auto* g = new QGroupBox(tr("What to analyze"), this);
+    auto* gl = new QVBoxLayout(g);
+    for (const Def& d : defs) {
+        Row& r = m_rows[d.item];
+        r.check = new QCheckBox(d.name, g);
+        r.check->setToolTip(d.tip);
+        r.check->setChecked(d.on);
+        gl->addWidget(r.check);
+        auto* row = new QHBoxLayout;
+        row->setContentsMargins(24, 0, 0, 4);
+        r.result = new QLabel(g);
+        r.result->setWordWrap(true);
+        r.result->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        r.result->setObjectName("note");
+        row->addWidget(r.result, 1);
+        r.apply = new QPushButton(tr("Apply"), g);
+        r.apply->setVisible(false);
+        row->addWidget(r.apply, 0, Qt::AlignTop);
+        gl->addLayout(row);
+        const Item item = d.item;
+        connect(r.apply, &QPushButton::clicked, this, [this, item] {
+            Row& rr = m_rows[item];
+            if (rr.applyFn) rr.applyFn();
+            rr.apply->setEnabled(false);
+            rr.apply->setText(tr("Applied"));
+        });
+    }
+    l->addWidget(g);
+    m_autoApply = new QCheckBox(tr("Apply suggestions as they come in"), this);
+    l->addWidget(m_autoApply);
+    auto* br = new QHBoxLayout;
+    m_run = new QPushButton(tr("Analyze selected"), this);
+    m_run->setObjectName("primaryButton");
+    m_applyAll = new QPushButton(tr("Apply all"), this);
+    m_applyAll->setEnabled(false);
+    br->addWidget(m_run, 1);
+    br->addWidget(m_applyAll);
+    l->addLayout(br);
+    m_progress = new QProgressBar(this);
+    m_progress->setRange(0, 1000);
+    m_progress->setVisible(false);
+    l->addWidget(m_progress);
+    m_status = new QLabel(this);
+    m_status->setWordWrap(true);
+    l->addWidget(m_status);
+    l->addStretch(1);
+
+    connect(m_run, &QPushButton::clicked, this, [this] {
+        if (m_running) stop();
+        else start();
+    });
+    connect(m_applyAll, &QPushButton::clicked, this, [this] {
+        for (Row& r : m_rows)
+            if (r.apply->isVisible() && r.apply->isEnabled()) r.apply->click();
+        m_applyAll->setEnabled(false);
+    });
+    connect(s, &Session::projectChanged, this, [this](int w) {
+        if (w & (ChRefs | ChSource)) refresh();
+    });
+    connect(s, &Session::opened, this, [this] {
+        for (Row& r : m_rows) {
+            r.result->clear();
+            r.apply->setVisible(false);
+            r.applyFn = nullptr;
+        }
+        m_status->clear();
+        refresh();
+    });
+    connect(s, &Session::closed, this, &AnalyzeTab::refresh);
+    refresh();
+}
+
+void AnalyzeTab::refresh() {
+    const bool open = m_s->isOpen();
+    setEnabled(open);
+    if (!open) return;
+    const bool refs = !m_s->project().refs.empty();
+    Row& e = m_rows[EdgeLock];
+    e.check->setEnabled(refs && !m_running);
+    if (!refs) {
+        e.check->setChecked(false);
+        if (e.result->text().isEmpty() || !m_running) e.result->setText(tr("Set a reference in the Edge Lock tab first."));
+    } else if (e.result->text() == tr("Set a reference in the Edge Lock tab first.")) {
+        e.result->clear();
+    }
+    m_rows[Loudness].check->setEnabled(m_s->source().hasAudio && !m_running);
+    if (!m_s->source().hasAudio) m_rows[Loudness].check->setChecked(false);
+}
+
+std::pair<int64_t, int64_t> AnalyzeTab::range() const {
+    const int64_t n = m_s->frames();
+    if (m_range->currentIndex() == 1) return {0, n};
+    const EditSettings& e = m_s->project().edit;
+    const int64_t a = std::clamp<int64_t>(e.in, 0, n), b = e.out < 0 ? n : std::clamp<int64_t>(e.out, a, n);
+    return {a, b};
+}
+
+void AnalyzeTab::start() {
+    if (!m_s->isOpen() || m_running) return;
+    m_queue.clear();
+    for (Item i : {FieldComb, Idet, Crop, Levels, Loudness, Verify, EdgeLock})
+        if (m_rows[i].check->isChecked() && m_rows[i].check->isEnabled()) m_queue.push_back(i);
+    if (m_queue.empty()) {
+        m_status->setText(tr("Tick at least one thing to analyze."));
+        return;
+    }
+    for (Item i : m_queue) {
+        m_rows[i].result->setText(tr("waiting"));
+        m_rows[i].apply->setVisible(false);
+        m_rows[i].applyFn = nullptr;
+    }
+    m_total = int(m_queue.size());
+    m_running = true;
+    m_cancel = std::make_shared<std::atomic<bool>>(false);
+    m_run->setText(tr("Stop"));
+    m_run->setProperty("running", true);
+    m_run->style()->unpolish(m_run);
+    m_run->style()->polish(m_run);
+    m_progress->setValue(0);
+    m_progress->setVisible(true);
+    m_applyAll->setEnabled(false);
+    for (Row& r : m_rows) r.check->setEnabled(false);
+    m_range->setEnabled(false);
+    runNext();
+}
+
+void AnalyzeTab::stop() {
+    if (!m_running) return;
+    if (m_cancel) *m_cancel = true;
+    if (!m_queue.empty() && m_queue.front() == EdgeLock) emit stopRequested();
+}
+
+void AnalyzeTab::finishItem(Item i, const QString& text, std::function<void()> apply) {
+    Row& r = m_rows[i];
+    r.result->setText(text);
+    r.applyFn = std::move(apply);
+    r.apply->setText(tr("Apply"));
+    r.apply->setEnabled(bool(r.applyFn));
+    r.apply->setVisible(bool(r.applyFn));
+    if (r.applyFn && m_autoApply->isChecked()) r.apply->click();
+    if (!m_queue.empty()) m_queue.erase(m_queue.begin());
+    if (m_cancel && *m_cancel) {
+        for (Item q : m_queue) m_rows[q].result->setText(tr("not run"));
+        m_queue.clear();
+    }
+    runNext();
+}
+
+void AnalyzeTab::edgeLockProgress(double fraction, const QString& status) {
+    if (!m_running || m_queue.empty() || m_queue.front() != EdgeLock) return;
+    const int done = m_total - int(m_queue.size());
+    m_progress->setValue(int(1000.0 * (double(done) + fraction) / double(m_total)));
+    m_rows[EdgeLock].result->setText(status);
+}
+
+void AnalyzeTab::edgeLockDone(bool ok, const QString& status) {
+    if (!m_running || m_queue.empty() || m_queue.front() != EdgeLock) return;
+    finishItem(EdgeLock, ok ? status : tr("<span style='color:#D29922'>%1</span>").arg(status.toHtmlEscaped()), nullptr);
+}
+
+void AnalyzeTab::runNext() {
+    if (m_queue.empty() || !m_s->isOpen()) {
+        const bool stopped = m_cancel && *m_cancel;
+        m_running = false;
+        m_run->setText(tr("Analyze selected"));
+        m_run->setProperty("running", false);
+        m_run->style()->unpolish(m_run);
+        m_run->style()->polish(m_run);
+        m_progress->setVisible(false);
+        m_range->setEnabled(true);
+        for (Row& r : m_rows) r.check->setEnabled(true);
+        refresh();
+        bool any = false;
+        for (Row& r : m_rows) any |= r.apply->isVisible() && r.apply->isEnabled();
+        m_applyAll->setEnabled(any);
+        m_status->setText(stopped ? tr("Stopped.") : tr("Done."));
+        return;
+    }
+    const Item item = m_queue.front();
+    const int done = m_total - int(m_queue.size());
+    m_progress->setValue(int(1000.0 * double(done) / double(m_total)));
+    m_status->setText(tr("%1 (%2 of %3)").arg(m_rows[item].check->text()).arg(done + 1).arg(m_total));
+    m_rows[item].result->setText(tr("running..."));
+    const SourceInfo src = m_s->source();
+    const Project proj = m_s->project();
+    const auto [a, b] = range();
+    auto cancel = m_cancel;
+    QPointer<AnalyzeTab> self(this);
+    const int total = m_total;
+    // Progress from the worker thread, as a share of the whole run.
+    auto progress = [self, done, total, cancel](double f) {
+        QMetaObject::invokeMethod(
+            self,
+            [self, done, total, f] {
+                if (self) self->m_progress->setValue(int(1000.0 * (double(done) + f) / double(total)));
+            },
+            Qt::QueuedConnection);
+        return !*cancel;
+    };
+    const QString stopped = tr("Stopped.");
+
+    switch (item) {
+    case FieldComb: {
+        auto res = std::make_shared<FieldOrderCheck>();
+        runInBackground(
+            this,
+            [src, res] {
+                SourceReader r;
+                std::string e;
+                if (r.open(src, e)) *res = checkFieldOrder(r, src);
+            },
+            [this, res] {
+                m_s->setFieldCheck(*res);
+                QString t = tr("Comb test: <b>%1</b>, confidence %2. In use: %3.")
+                                .arg(fieldOrderName(res->comb))
+                                .arg(res->combConfidence, 0, 'f', 2)
+                                .arg(fieldOrderName(m_s->project().renderFieldOrder()));
+                if (m_s->project().fieldOverride) t += tr(" The Source tab has the field order set by hand, so that stays.");
+                finishItem(FieldComb, t, nullptr);
+            });
+        return;
+    }
+    case Idet: {
+        auto res = std::make_shared<IdetResult>();
+        runInBackground(
+            this, [src, a, b, res, progress] { *res = runIdet(src, a, b, 8, 240, progress); },
+            [this, res, stopped] {
+                if (!res->ok) {
+                    finishItem(Idet, res->error == "cancelled" ? stopped : QString::fromStdString(res->error), nullptr);
+                    return;
+                }
+                const int64_t rep = res->repeatedTop + res->repeatedBottom, all = rep + res->repeatedNeither;
+                QString t = tr("Top first %1, bottom first %2, progressive %3, undecided %4 (of %5 frames). Repeated fields on %6% of frames.")
+                                .arg(res->tff)
+                                .arg(res->bff)
+                                .arg(res->progressive)
+                                .arg(res->undetermined)
+                                .arg(res->frames)
+                                .arg(all ? 100.0 * double(rep) / double(all) : 0.0, 0, 'f', 1);
+                std::function<void()> apply;
+                const FieldOrder order = res->order;
+                const bool film = res->film;
+                if (order == FieldOrder::Progressive) {
+                    t += tr("<br><b>Looks progressive.</b> Deinterlacing it costs little with bwdif; None leaves it as it is.");
+                } else {
+                    t += tr("<br>Suggests <b>%1</b>%2 (%3% of decided frames agree).")
+                             .arg(fieldOrderName(order), film ? tr(" and <b>IVTC</b>, since this is telecined film") : QString())
+                             .arg(res->confidence * 100.0, 0, 'f', 0);
+                    // A weak verdict is shown but not offered.
+                    if (res->confidence >= 0.8)
+                        apply = [this, order, film] {
+                            Project& p = m_s->project();
+                            p.fieldOverride = true;
+                            p.fieldOrder = order;
+                            int what = ChSource;
+                            if (film) {
+                                p.deint.mode = DeintMode::Ivtc;
+                                what |= ChDeint;
+                            }
+                            m_s->changed(what);
+                        };
+                }
+                finishItem(Idet, t, apply);
+            });
+        return;
+    }
+    case Crop: {
+        auto res = std::make_shared<CropDetectResult>();
+        runInBackground(
+            this, [src, a, b, res, progress] { *res = runCropDetect(src, a, b, 120, progress); },
+            [this, res, stopped] {
+                if (!res->ok) {
+                    finishItem(Crop, res->error == "cancelled" ? stopped : QString::fromStdString(res->error), nullptr);
+                    return;
+                }
+                int sl = 0, sr = 0, sb = 0;
+                // The same guide the Crop tab draws.
+                sb = 8;
+                if (m_s->project().edgeActive() && !m_s->tracks().fields.empty()) m_s->tracks().safeCrop(m_s->project().edge.strength, sl, sr);
+                const int L = std::max(res->left, sl), R = std::max(res->right, sr), T = res->top, B = std::max(res->bottom, sb);
+                QString t = tr("Black in all %1 samples: left %2, right %3, top %4, bottom %5 px.").arg(res->frames).arg(res->left).arg(res->right).arg(res->top).arg(res->bottom);
+                t += tr("<br>Suggested crop with the safe guide: left %1, right %2, top %3, bottom %4.").arg(L).arg(R).arg(T).arg(B);
+                finishItem(Crop, t, [this, L, R, T, B] {
+                    CropSettings& c = m_s->project().crop;
+                    c.left = L;
+                    c.right = R;
+                    c.top = T;
+                    c.bottom = B;
+                    m_s->changed(ChCrop);
+                });
+            });
+        return;
+    }
+    case Levels: {
+        auto res = std::make_shared<std::pair<double, double>>(16, 235);
+        auto ok = std::make_shared<bool>(false);
+        runInBackground(
+            this, [src, proj, a, b, res, ok, cancel] { *ok = measureLevels(src, proj, a, b, res->first, res->second, cancel.get()); },
+            [this, res, ok, cancel, stopped] {
+                if (!*ok) {
+                    finishItem(Levels, *cancel ? stopped : tr("Could not measure the levels."), nullptr);
+                    return;
+                }
+                const double bl = res->first, wh = res->second;
+                const QString t = tr("Black point <b>%1</b>, white point <b>%2</b> (legal range is 16 to 235).").arg(bl, 0, 'f', 0).arg(wh, 0, 'f', 0);
+                finishItem(Levels, t, [this, bl, wh] {
+                    // The whole-clip color, the one Per chapter starts from.
+                    ColorSettings& c = m_s->project().color;
+                    c.blackPoint = bl;
+                    c.whitePoint = wh;
+                    m_s->changed(ChColor);
+                });
+            });
+        return;
+    }
+    case Loudness: {
+        auto res = std::make_shared<LoudnessResult>();
+        EditSettings e;
+        if (m_range->currentIndex() == 0) e = proj.edit;  // the audio the render writes
+        const EditList el = EditList::build(src.frames, e);
+        runInBackground(
+            this, [src, el, res, progress] { *res = runLoudness(src, el, progress); },
+            [this, res, stopped] {
+                if (!res->ok) {
+                    finishItem(Loudness, res->error == "cancelled" ? stopped : QString::fromStdString(res->error), nullptr);
+                    return;
+                }
+                QString t = tr("<b>%1 LUFS</b> integrated, loudness range %2 LU, sample peak %3 dBFS.")
+                                .arg(res->integrated, 0, 'f', 1)
+                                .arg(res->range, 0, 'f', 1)
+                                .arg(res->peakDb, 0, 'f', 1);
+                if (res->clipped > 0)
+                    t += tr("<br><span style='color:#D29922'>%1 samples sit at full scale: clipped on the tape or in the capture. Nothing "
+                            "here can undo that.</span>")
+                             .arg(thousands(res->clipped));
+                else t += tr("<br>Nothing at full scale.");
+                t += tr("<br>For reference, YouTube plays uploads louder than about -14 LUFS quieter and leaves quieter ones alone.");
+                finishItem(Loudness, t, nullptr);
+            });
+        return;
+    }
+    case Verify: {
+        auto res = std::make_shared<QString>();
+        runInBackground(
+            this,
+            [src, res, cancel] {
+                for (size_t i = 0; i < src.segments.size(); ++i) {
+                    const SourceSegment& g = src.segments[i];
+                    const VerifyResult v = verifyCapture(g.file, true, [cancel](double, const std::string&) { return !*cancel; });
+                    *res += QFileInfo(QString::fromStdString(g.file)).fileName().toHtmlEscaped() + ": " + QString::fromStdString(v.summary()).toHtmlEscaped() + "<br>";
+                    if (v.cancelled) break;
+                }
+            },
+            [this, res] { finishItem(Verify, res->isEmpty() ? tr("Nothing to verify.") : res->left(res->size() - 4), nullptr); });
+        return;
+    }
+    case EdgeLock: emit edgeLockRequested(); return;
+    default: break;
+    }
+    finishItem(item, QString(), nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -735,31 +1169,17 @@ void ColorTab::autoLevels() {
         a = std::max(a, s.chapters[size_t(ch)].start);
         b = std::min(b, s.chapters[size_t(ch)].end);
     }
-    auto hist = std::make_shared<LevelHistogram>();
+    auto levels = std::make_shared<std::pair<double, double>>(16, 235);
+    auto ok = std::make_shared<bool>(false);
     runInBackground(
-        this,
-        [s, p, a, b, hist] {
-            SourceReader r;
-            std::string err;
-            if (!r.open(s, err) || b <= a) return;
-            const int64_t step = std::max<int64_t>(1, (b - a) / 200);
-            for (int64_t n = a; n < b; n += step) {
-                bool cut = false;
-                for (const CutSpan& c : p.edit.cuts) cut |= n >= c.start && n < c.end;
-                if (cut) continue;
-                FramePtr f = r.read(n);
-                Picture pic;
-                if (f && toPicture(f.get(), pic, true)) hist->add(pic, 16, 8);
-            }
-        },
-        [this, hist] {
+        this, [s, p, a, b, levels, ok] { *ok = measureLevels(s, p, a, b, levels->first, levels->second, nullptr); },
+        [this, levels, ok] {
             m_auto->setEnabled(true);
             m_auto->setText(tr("Auto levels"));
-            double bl = 16, wh = 235;
-            if (!hist->suggest(bl, wh)) return;
+            if (!*ok) return;
             ColorSettings& c = current();
-            c.blackPoint = bl;
-            c.whitePoint = wh;
+            c.blackPoint = levels->first;
+            c.whitePoint = levels->second;
             m_s->changed(ChColor);
         });
 }
@@ -874,6 +1294,19 @@ void CropTab::refresh() {
 
 OutputTab::OutputTab(Session* s, QWidget* parent) : QWidget(parent), m_s(s) {
     QVBoxLayout* l = scrolled(this);
+    auto* pf = new QFormLayout;
+    m_upload = new QComboBox(this);
+    m_upload->addItem(tr("Pick one to fill in the settings below..."), -1);
+    m_upload->addItem(tr("YouTube 1080p: H.264, AAC, MP4"), int(UploadPreset::YouTube1080));
+    m_upload->addItem(tr("YouTube 4K: H.264, AAC, MP4"), int(UploadPreset::YouTube2160));
+    m_upload->addItem(tr("YouTube 1080p: AV1, AAC, MP4"), int(UploadPreset::YouTube1080Av1));
+    m_upload->addItem(tr("YouTube 4K: AV1, AAC, MP4"), int(UploadPreset::YouTube2160Av1));
+    m_upload->setToolTip(tr("YouTube's own recommendation is H.264 in MP4 with AAC at 384 kb/s, which the H.264 presets follow. The AV1 ones "
+                            "make a smaller file that YouTube also takes. Both upscale, since YouTube gives a 480p upload its lowest "
+                            "bitrate and smooths it, and a 1080p or 4K upload of the same picture comes back looking better. The upscale "
+                            "adds no detail."));
+    pf->addRow(tr("Upload preset"), m_upload);
+    l->addLayout(pf);
     auto* gv = new QGroupBox(tr("Video"), this);
     auto* f = new QFormLayout(gv);
     m_codec = new QComboBox(gv);
@@ -892,6 +1325,26 @@ OutputTab::OutputTab(Session* s, QWidget* parent) : QWidget(parent), m_s(s) {
                          "resolution costs nothing you can see."));
     f->addRow(m_422);
     l->addWidget(gv);
+    auto* gs = new QGroupBox(tr("Resize"), this);
+    auto* fs = new QFormLayout(gs);
+    m_scale = new QComboBox(gs);
+    m_scale->addItem(tr("Keep the size"), 0);
+    m_scale->addItem(tr("720p"), 720);
+    m_scale->addItem(tr("1080p"), 1080);
+    m_scale->addItem(tr("1440p"), 1440);
+    m_scale->addItem(tr("2160p (4K)"), 2160);
+    fs->addRow(tr("Height"), m_scale);
+    m_scaler = new QComboBox(gs);
+    m_scaler->addItem(tr("Lanczos (sharpest)"), "lanczos");
+    m_scaler->addItem(tr("Spline"), "spline");
+    m_scaler->addItem(tr("Bicubic (softest)"), "bicubic");
+    fs->addRow(tr("Scaler"), m_scaler);
+    m_scaleInfo = noteLabel(QString(), gs);
+    fs->addRow(m_scaleInfo);
+    fs->addRow(noteLabel(tr("Scales last, after the crop, to square pixels at the picture's shape. HD sizes are converted to and tagged "
+                            "BT.709, since that is what players assume for HD. Use it for uploads; keep the size for an archive copy."),
+                         gs));
+    l->addWidget(gs);
     auto* ga = new QGroupBox(tr("Audio"), this);
     auto* fa = new QFormLayout(ga);
     m_audio = new QComboBox(ga);
@@ -927,6 +1380,18 @@ OutputTab::OutputTab(Session* s, QWidget* parent) : QWidget(parent), m_s(s) {
     m_captions = new QCheckBox(tr("Captions (from PingDub's SRT sidecars)"), gc);
     fc->addRow(m_chapters);
     fc->addRow(m_captions);
+    auto* cr = new QHBoxLayout;
+    m_contact = new QCheckBox(tr("Contact sheet, a thumbnail every"), gc);
+    m_contact->setToolTip(tr("JPEG pages next to the output, made from the finished file: the tape label and runtime along the top, the "
+                             "time under each thumbnail, 60 to a page."));
+    m_contactEvery = new QSpinBox(gc);
+    m_contactEvery->setRange(1, 3600);
+    m_contactEvery->setSuffix(tr(" s"));
+    m_contactEvery->setKeyboardTracking(false);
+    cr->addWidget(m_contact);
+    cr->addWidget(m_contactEvery);
+    cr->addStretch(1);
+    fc->addRow(cr);
     l->addWidget(gc);
     m_path = new QLabel(this);
     m_path->setWordWrap(true);
@@ -944,6 +1409,17 @@ OutputTab::OutputTab(Session* s, QWidget* parent) : QWidget(parent), m_s(s) {
                            this));
     l->addStretch(1);
 
+    connect(m_upload, qOverload<int>(&QComboBox::activated), this, [this](int i) {
+        const int v = m_upload->itemData(i).toInt();
+        m_upload->setCurrentIndex(0);
+        if (v < 0) return;
+        applyUploadPreset(m_s->project().out, UploadPreset(v));
+        m_s->changed(ChOutput);
+    });
+    connect(m_scale, qOverload<int>(&QComboBox::activated), this, &OutputTab::changed);
+    connect(m_scaler, qOverload<int>(&QComboBox::activated), this, &OutputTab::changed);
+    connect(m_contact, &QCheckBox::toggled, this, &OutputTab::changed);
+    connect(m_contactEvery, qOverload<int>(&QSpinBox::valueChanged), this, &OutputTab::changed);
     connect(m_codec, qOverload<int>(&QComboBox::activated), this, [this] {
         OutputSettings& o = m_s->project().out;
         const VideoCodec c = VideoCodec(m_codec->currentData().toInt());
@@ -979,7 +1455,7 @@ OutputTab::OutputTab(Session* s, QWidget* parent) : QWidget(parent), m_s(s) {
     connect(m_render, &QPushButton::clicked, this, &OutputTab::renderRequested);
     connect(m_queue, &QPushButton::clicked, this, &OutputTab::queueRequested);
     connect(s, &Session::projectChanged, this, [this](int w) {
-        if (w & (ChOutput | ChSource | ChEdit | ChDeint)) refresh();
+        if (w & (ChOutput | ChSource | ChEdit | ChDeint | ChCrop)) refresh();
     });
 }
 
@@ -995,6 +1471,10 @@ void OutputTab::changed() {
     o.name = m_name->text().toStdString();
     o.chapters = m_chapters->isChecked();
     o.captions = m_captions->isChecked();
+    o.scaleHeight = m_scale->currentData().toInt();
+    o.scaler = m_scaler->currentData().toString().toStdString();
+    o.contactSheet = m_contact->isChecked();
+    o.contactInterval = m_contactEvery->value();
     m_s->changed(ChOutput);
 }
 
@@ -1005,6 +1485,22 @@ void OutputTab::refresh() {
     OutputSettings& o = m_s->project().out;
     if (o.folder.empty() && !AppSettings::instance().lastOutputFolder.isEmpty()) o.folder = AppSettings::instance().lastOutputFolder.toStdString();
     const QSignalBlocker a(m_codec), b(m_preset), c(m_422), d(m_audio), e(m_kbps), f(m_container), g(m_folder), h(m_name), i(m_chapters), j(m_captions);
+    const QSignalBlocker k(m_scale), k2(m_scaler), k3(m_contact), k4(m_contactEvery);
+    // Encoders this build lacks stay listed but can't be picked.
+    if (auto* model = qobject_cast<QStandardItemModel*>(m_codec->model()))
+        for (int n = 0; n < m_codec->count(); ++n) {
+            const bool have = videoCodecAvailable(VideoCodec(m_codec->itemData(n).toInt()));
+            model->item(n)->setEnabled(have);
+            model->item(n)->setToolTip(have ? QString() : tr("This build has no %1 encoder.").arg(videoEncoderName(VideoCodec(m_codec->itemData(n).toInt()))));
+        }
+    if (auto* model = qobject_cast<QStandardItemModel*>(m_upload->model()))
+        for (int n = 1; n < m_upload->count(); ++n) {
+            const UploadPreset up = UploadPreset(m_upload->itemData(n).toInt());
+            const bool av1 = up == UploadPreset::YouTube1080Av1 || up == UploadPreset::YouTube2160Av1;
+            const bool have = av1 ? videoCodecAvailable(VideoCodec::SvtAv1) : videoCodecAvailable(VideoCodec::X264);
+            model->item(n)->setEnabled(have);
+            model->item(n)->setToolTip(have ? QString() : tr("This build has no encoder for it."));
+        }
     m_codec->setCurrentIndex(m_codec->findData(int(o.codec)));
     const int mx = rfMax(o.codec);
     m_rf->setEnabled(mx > 0);
@@ -1034,11 +1530,26 @@ void OutputTab::refresh() {
     m_name->setPlaceholderText(QString::fromStdString(defaultOutputName(m_s->source())));
     m_chapters->setChecked(o.chapters);
     m_captions->setChecked(o.captions && !o.mp4);
+    {
+        const int si = m_scale->findData(o.scaleHeight);
+        m_scale->setCurrentIndex(si < 0 ? 0 : si);
+        const int sc = m_scaler->findData(QString::fromStdString(o.scaler));
+        m_scaler->setCurrentIndex(sc < 0 ? 0 : sc);
+        m_scaler->setEnabled(o.scaleHeight > 0);
+        const SourceInfo& src = m_s->source();
+        const OutputGeometry gm = outputGeometry(m_s->project(), src, encoderPixelFormat(effectiveOutput(o), src));
+        if (gm.scale) m_scaleInfo->setText(tr("%1x%2 after the crop becomes <b>%3x%4</b>, square pixels.").arg(gm.preWidth).arg(gm.preHeight).arg(gm.width).arg(gm.height));
+        else if (o.scaleHeight > 0) m_scaleInfo->setText(tr("<span style='color:#D29922'>Not scaled: the output stays interlaced (Deinterlace is None).</span>"));
+        else m_scaleInfo->setText(tr("Output stays %1x%2.").arg(gm.width).arg(gm.height));
+        m_contact->setChecked(o.contactSheet);
+        m_contactEvery->setValue(o.contactInterval);
+        m_contactEvery->setEnabled(o.contactSheet);
+    }
     const OutputSettings eff = effectiveOutput(o);
     QString note;
     if (eff.audio != o.audio) note = tr("<br><span style='color:#D29922'>MP4: audio will be AAC.</span>");
     if (o.folder.empty())
-        m_path->setText(tr("Writes <b>%1</b> and a .uindub.json sidecar into a folder you pick. Nothing goes next to the master unless you pick its folder.")
+        m_path->setText(tr("Writes <b>%1</b> and a .uindub.json sidecar (and the contact sheet, when ticked) into a folder you pick. Nothing goes next to the master unless you pick its folder.")
                             .arg(QString::fromStdString(defaultOutputName(m_s->source()) + (eff.mp4 ? ".mp4" : ".mkv")).toHtmlEscaped()) +
                         note);
     else

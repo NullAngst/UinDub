@@ -16,6 +16,10 @@
 #include <QSpinBox>
 #include <QWidget>
 
+#include <atomic>
+#include <functional>
+#include <memory>
+
 namespace ud {
 
 std::vector<QColor> referenceColors();
@@ -37,6 +41,48 @@ private:
     QPushButton* m_verify;
     QCheckBox* m_verifyBefore;
     QLabel* m_verifyResult;
+};
+
+// Every measurement in one place: pick what to look at, run them in a row,
+// and apply what they suggest. Edge Lock's own Analyze is one of them.
+class AnalyzeTab : public QWidget {
+    Q_OBJECT
+public:
+    explicit AnalyzeTab(Session* s, QWidget* parent = nullptr);
+    void refresh();
+    // MainWindow runs Edge Lock's analysis and reports back here.
+    void edgeLockProgress(double fraction, const QString& status);
+    void edgeLockDone(bool ok, const QString& status);
+
+signals:
+    void edgeLockRequested();
+    void stopRequested();
+
+private:
+    enum Item { FieldComb, Idet, Crop, Levels, Loudness, EdgeLock, Verify, ItemCount };
+    struct Row {
+        QCheckBox* check = nullptr;
+        QLabel* result = nullptr;
+        QPushButton* apply = nullptr;
+        std::function<void()> applyFn;
+    };
+    void start();
+    void runNext();
+    void finishItem(Item i, const QString& text, std::function<void()> apply);
+    void stop();
+    std::pair<int64_t, int64_t> range() const;
+    Session* m_s;
+    Row m_rows[ItemCount];
+    QComboBox* m_range;
+    QCheckBox* m_autoApply;
+    QPushButton* m_run;
+    QPushButton* m_applyAll;
+    QProgressBar* m_progress;
+    QLabel* m_status;
+    std::vector<Item> m_queue;
+    int m_total = 0;
+    bool m_running = false;
+    std::shared_ptr<std::atomic<bool>> m_cancel;
 };
 
 class EdgeLockTab : public QWidget {
@@ -153,6 +199,7 @@ signals:
 private:
     void changed();
     Session* m_s;
+    QComboBox* m_upload;
     QComboBox* m_codec;
     SliderSpin* m_rf;
     QComboBox* m_preset;
@@ -164,6 +211,11 @@ private:
     QLineEdit* m_name;
     QCheckBox* m_chapters;
     QCheckBox* m_captions;
+    QComboBox* m_scale;
+    QComboBox* m_scaler;
+    QLabel* m_scaleInfo;
+    QCheckBox* m_contact;
+    QSpinBox* m_contactEvery;
     QLabel* m_path;
     QPushButton* m_render;
     QPushButton* m_queue;
