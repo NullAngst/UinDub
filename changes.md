@@ -1,5 +1,15 @@
 # Changes
 
+2026.11.13 - Bug fix
+
+* Fixed: File > Save project as with a folder inside the project (the dialog opened inside it, so a New Folder there was the easy pick) made `finish/finish/finish/...` folders until the path hit the 4096-byte limit. rename refused the move, the code took any rename failure to mean "different file system", and the recursive copy fallback copied into its own output. A folder inside the project, or the project itself, is now refused with a message and nothing is written
+* The copy fallback now only runs when rename says the target is on another file system (EXDEV); any other rename error is reported as is
+* If that copy fails partway, the half-made copy is removed; the original was never touched
+* Save project as opens the folder dialog next to the project instead of inside it
+* New test: test_project_move
+
+Reasons for changes: a project folder full of nested `finish` folders, thousands deep, reported from real use.
+
 2026.11.04 - UX overhaul / Backend overhaul
 
 * Timeline: a bar over it with play/pause, frame step, start and end, In, Out, Go In, Go Out, Clear, Cut, Cut Sel and Uncut buttons, each running the same action as its key (tooltips name the key)

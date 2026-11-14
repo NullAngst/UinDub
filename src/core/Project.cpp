@@ -410,23 +410,60 @@ std::string defaultProjectFolder(const std::string& sourcePath) {
     return (fs::path(videosDir()) / "UinDub" / stem).string();
 }
 
+namespace {
+
+// Absolute, symlinks resolved where the path exists, no trailing slash.
+fs::path resolved(const std::string& s) {
+    std::error_code ec;
+    fs::path r = fs::weakly_canonical(fs::absolute(s, ec), ec);
+    if (ec) r = fs::absolute(s).lexically_normal();
+    if (r.filename().empty() && r.has_parent_path() && r != r.root_path()) r = r.parent_path();
+    return r;
+}
+
+// True when inner is outer itself or anywhere below it.
+bool sameOrInside(const fs::path& outer, const fs::path& inner) {
+    auto o = outer.begin();
+    auto i = inner.begin();
+    for (; o != outer.end(); ++o, ++i)
+        if (i == inner.end() || *o != *i) return false;
+    return true;
+}
+
+}  // namespace
+
 bool moveProject(Project& p, const std::string& newFolder, std::string& err) {
     std::error_code ec;
-    if (fs::exists(newFolder, ec) && !fs::is_empty(newFolder, ec)) {
+    // A folder inside the project can never hold it: rename refuses, and a
+    // recursive copy into it copies its own output forever (finish/finish/...).
+    if (sameOrInside(resolved(p.folder), resolved(newFolder))) {
+        err = "cannot move the project into its own folder (" + p.folder + "). Pick a folder outside it.";
+        return false;
+    }
+    const bool existed = fs::exists(newFolder, ec);
+    if (existed && !fs::is_empty(newFolder, ec)) {
         err = newFolder + " is not empty";
         return false;
     }
     fs::create_directories(fs::path(newFolder).parent_path(), ec);
+    ec.clear();
     fs::rename(p.folder, newFolder, ec);
-    if (ec) {
+    if (ec == std::errc::cross_device_link) {
         // Across file systems: copy, then remove the old one.
         ec.clear();
         fs::copy(p.folder, newFolder, fs::copy_options::recursive, ec);
         if (ec) {
             err = "cannot move the project: " + ec.message();
+            // The original is untouched; take back the half-made copy.
+            std::error_code rm;
+            fs::remove_all(newFolder, rm);
+            if (existed) fs::create_directory(newFolder, rm);
             return false;
         }
         fs::remove_all(p.folder, ec);
+    } else if (ec) {
+        err = "cannot move the project: " + ec.message();
+        return false;
     }
     p.folder = newFolder;
     return p.save(err);

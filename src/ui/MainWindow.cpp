@@ -504,7 +504,9 @@ void MainWindow::openDialog() {
 
 void MainWindow::saveAs() {
     if (!m_s->isOpen()) return;
-    const QString d = QFileDialog::getExistingDirectory(this, tr("Move the project to a new, empty folder"), QString::fromStdString(m_s->project().folder));
+    // Start beside the project, not inside it: a folder inside it cannot hold it.
+    const QString start = QFileInfo(QString::fromStdString(m_s->project().folder)).absolutePath();
+    const QString d = QFileDialog::getExistingDirectory(this, tr("Move the project to a new, empty folder"), start);
     if (d.isEmpty()) return;
     m_s->saveNow();
     std::string err;

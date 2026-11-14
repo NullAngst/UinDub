@@ -33,6 +33,7 @@ The tests worth reading when they fail:
 - `test_upload`: the 1080p scale, BT.709 tags, the contact sheet, and the check that audio and video stay interleaved in the file with caption tracks on. That last one guards the caption interleaving fix from 2026.11.04; if it fails, do not ship.
 - `test_detect`: idet, cropdetect and ebur128 on synthetic tape. A new FFmpeg that renames a `lavfi.*` metadata key breaks these first.
 - `test_output`: every encoder and container.
+- `test_project_move`: File > Save project as. Guards the 2026.11.13 fix where picking a folder inside the project copied the project into itself until the path ran out (`finish/finish/finish/...`). It is pure std::filesystem, so a libstdc++ change to `weakly_canonical` or `fs::copy` is what would break it.
 
 ## 3. Check the AppImage by hand
 

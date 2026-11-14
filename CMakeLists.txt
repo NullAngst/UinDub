@@ -103,7 +103,7 @@ if(UINDUB_BUILD_TESTS)
     target_include_directories(uindub_testutil INTERFACE tests src)
     target_link_libraries(uindub_testutil INTERFACE uindub_core)
     set(UINDUB_TESTS neutral jitter_synth real_motion dark occlusion cut subpixel field_order pingdub_inputs output color
-        offsets_store cuts qtgmc pal warble upload detect)
+        offsets_store cuts qtgmc pal warble upload detect project_move)
     foreach(t ${UINDUB_TESTS})
         if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_${t}.cpp)
             message(WARNING "tests/test_${t}.cpp is missing")
